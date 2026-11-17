@@ -40,9 +40,11 @@
 #include <rex/ui/window.h>
 #if defined(__APPLE__)
 #include <SDL3/SDL_metal.h>
+#include <dlfcn.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <rex/ui/window_sdl.h>
+extern "C" void (*DiligentRenderScopeEndHook)(void* site, void* caller);
 #endif
 
 #include <fmt/format.h>
@@ -68,6 +70,10 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+REXCVAR_DEFINE_BOOL(dante_rp_diag, false, "Diagnostics",
+                    "renderer=dante (iOS): log where DiligentCore ends render passes, with each PERF "
+                    "summary (addresses relative to the app binary, for atos)");
 
 REXCVAR_DEFINE_INT32(dante_precompile_threads, 0, "Diagnostics",
                      "renderer=dante: threads building the recorded shaders and pipelines at "
@@ -1211,6 +1217,46 @@ struct PerfWindow {
 };
 PerfWindow g_perf;
 
+#if defined(__APPLE__)
+std::mutex g_rp_mutex;
+std::map<std::pair<uintptr_t, uintptr_t>, uint64_t> g_rp_sites;
+uint64_t g_rp_total = 0;
+void NoteRenderScopeEnd(void* site, void* caller) {
+  std::lock_guard lock(g_rp_mutex);
+  ++g_rp_sites[{uintptr_t(site), uintptr_t(caller)}];
+  ++g_rp_total;
+}
+void LogRenderScopeEnds(double seconds, size_t frames) {
+  static bool installed = false;
+  if (!REXCVAR_GET(dante_rp_diag)) return;
+  if (!installed) {
+    DiligentRenderScopeEndHook = &NoteRenderScopeEnd;
+    installed = true;
+    return;
+  }
+  std::vector<std::pair<uint64_t, std::pair<uintptr_t, uintptr_t>>> top;
+  uint64_t total;
+  {
+    std::lock_guard lock(g_rp_mutex);
+    for (auto& [k, v] : g_rp_sites) top.push_back({v, k});
+    total = g_rp_total;
+    g_rp_sites.clear();
+    g_rp_total = 0;
+  }
+  std::sort(top.begin(), top.end(), std::greater<>());
+  Dl_info info{};
+  dladdr(reinterpret_cast<void*>(&NoteRenderScopeEnd), &info);
+  const uintptr_t base = uintptr_t(info.dli_fbase);
+  std::string out;
+  for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+    out += fmt::format(" {}x site+{:X} caller+{:X};", top[i].first, top[i].second.first - base,
+                       top[i].second.second - base);
+  }
+  REXLOG_INFO("PERF render passes ended: {} in {:.0f} s ({:.0f}/frame):{}", total, seconds,
+              frames ? double(total) / frames : 0.0, out);
+}
+#endif
+
 void PerfOnSwap(uint32_t draws, uint32_t resolves) {
   using Clock = std::chrono::steady_clock;
   PerfWindow& p = g_perf;
@@ -1259,6 +1305,9 @@ void PerfOnSwap(uint32_t draws, uint32_t resolves) {
     long thermal = info ? send_long(info, sel_registerName("thermalState")) : -1;
     REXLOG_INFO("PERF thermal: {}", thermal >= 0 && thermal < 4 ? kThermal[thermal] : "unknown");
   }
+#endif
+#if defined(__APPLE__)
+  LogRenderScopeEnds(seconds, sorted.size());
 #endif
   std::string threads = BusiestThreads(seconds);
   if (!threads.empty()) REXLOG_INFO("PERF threads: {}", threads);

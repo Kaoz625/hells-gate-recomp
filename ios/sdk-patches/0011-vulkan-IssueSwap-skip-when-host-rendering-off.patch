@@ -1,0 +1,42 @@
+From 6aa45154943a2b9b968e6f3a5ea448b39b12af71 Mon Sep 17 00:00:00 2001
+From: Mark Anthony <markususeche@gmail.com>
+Date: Tue, 17 Nov 2026 10:29:05 -0500
+Subject: [PATCH] Vulkan IssueSwap: nothing to do when gpu_host_rendering is
+ off (Hell's Gate renderer=dante): no front-buffer texture load / guest output
+ refresh
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/graphics/vulkan/command_processor.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index bff1924..7a32243 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -76,6 +76,8 @@ namespace {
+ // vkWaitForFences. Line 0 = swap submit; a negative line = a full drain (AwaitAllQueueOperationsCompletion) called
+ // from that line. Logged every 300 swaps by IssueSwap.
+ }  // namespace
++REXCVAR_DECLARE(bool, gpu_host_rendering);
++
+ namespace rex::graphics {
+ extern std::atomic<uint64_t> g_diag_wrm_us, g_diag_wrm_waits, g_diag_ring_us, g_diag_ring_waits;
+ }  // namespace rex::graphics
+@@ -2325,6 +2327,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
++  // Host rendering off (Hell's Gate renderer = dante draws natively): the guest's swap side effects ran in
++  // the packet handler; loading the front buffer texture and refreshing the detached presenter's guest output
++  // here is GPU work nobody sees (~5 ms of compute per swap on an iPhone 15 Pro Max, 17 Nov 2026).
++  if (!REXCVAR_GET(gpu_host_rendering)) {
++    return;
++  }
++
+   if (!graphics_system_)
+     return;
+   ui::Presenter* presenter = graphics_system_->presenter();
+-- 
+2.54.0 (Apple Git-157)
+

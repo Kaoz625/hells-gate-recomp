@@ -57,6 +57,7 @@ endif()
 set(DANTESINFERNO_SOURCES
     src/main.cpp
     src/autopilot_input.cpp
+    src/apple_env.cpp
     src/animation_hooks.cpp
     src/damage_hooks.cpp
     src/frame_rate_hooks.cpp
@@ -117,9 +118,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # The SDK stages librexruntime + MoltenVK into Frameworks/; the Xenos GPU plugin is dlopened by name
     # from Frameworks/ (gpu_plugin_loader.cpp), so copy it from the installed SDK.
     get_filename_component(DANTESINFERNO_SDK_LIB "${rexglue_DIR}/../.." ABSOLUTE)
+    set(DANTESINFERNO_XENOS_PLUGIN "${DANTESINFERNO_SDK_LIB}/librexgpu-xenos.dylib" CACHE FILEPATH
+        "rexgpu-xenos plugin staged into Frameworks/ (default: the installed SDK's)")
     add_custom_command(TARGET dantes_inferno POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:dantes_inferno>/Frameworks"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DANTESINFERNO_SDK_LIB}/librexgpu-xenos.dylib"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DANTESINFERNO_XENOS_PLUGIN}"
                 "$<TARGET_BUNDLE_CONTENT_DIR:dantes_inferno>/Frameworks/librexgpu-xenos.dylib"
         VERBATIM)
     target_link_options(dantes_inferno PRIVATE "-Wl,-rpath,@executable_path/Frameworks")

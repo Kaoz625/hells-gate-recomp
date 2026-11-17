@@ -25,6 +25,52 @@ index 353157c..4b27c47 100644
  elseif(PLATFORM_ANDROID)
      set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
  else()
+diff --git a/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp b/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
+index 994750b..8d781da 100644
+--- a/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
++++ b/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
+@@ -31,6 +31,10 @@
+ #include "VulkanHeaders.h"
+ #include "DebugUtilities.hpp"
+ 
++#if PLATFORM_IOS
++extern "C" void (*DiligentRenderScopeEndHook)(void* site, void* caller);
++#endif
++
+ namespace VulkanUtilities
+ {
+ 
+@@ -379,6 +383,15 @@ public:
+ 
+     __forceinline void EndRenderScope()
+     {
++#if PLATFORM_IOS
++        // Hell's Gate blz/ios-native diagnostics: where render passes are split (renderer.cpp dante_rp_diag).
++        if ((m_State.RenderPass != VK_NULL_HANDLE || m_State.DynamicRenderingHash != 0) && DiligentRenderScopeEndHook)
++        {
++            __label__ here;
++        here:
++            DiligentRenderScopeEndHook(&&here, __builtin_return_address(0));
++        }
++#endif
+         if (m_State.RenderPass != VK_NULL_HANDLE)
+             EndRenderPass();
+         else if (m_State.DynamicRenderingHash != 0)
+diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp
+index 74a21fc..a7aa641 100644
+--- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp
+@@ -29,6 +29,10 @@
+ #include "VulkanUtilities/CommandBuffer.hpp"
+ #include "AdvancedMath.hpp"
+ 
++#if PLATFORM_IOS
++extern "C" void (*DiligentRenderScopeEndHook)(void* site, void* caller) = nullptr;
++#endif
++
+ namespace VulkanUtilities
+ {
+ 
 diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
 index 4534337..a6542cb 100644
 --- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
