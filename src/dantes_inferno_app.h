@@ -495,6 +495,15 @@ class DantesInfernoApp : public rex::ReXApp {
     std::string dlc_path = REXCVAR_GET(dlc_source_path);
     if (dlc_path.empty()) dlc_path = "dlc";
     std::filesystem::path root(dlc_path);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // iPhone/iPad: the default relative "dlc" has no meaning in an app sandbox; the DLC packages go in Documents/dlc
+    // (loose STFS files, as copied from an Xbox 360's Content/.../454108CF/00000002/), next to Documents/game.
+    if (dlc_path == "dlc") {
+      if (const char* home = std::getenv("HOME"); home && *home) {
+        root = std::filesystem::path(home) / "Documents" / "dlc";
+      }
+    }
+#endif
     if (!std::filesystem::exists(root)) {
       REXLOG_INFO("DLC folder not found ({}); running without DLC", dlc_path);
       return;
