@@ -35,11 +35,14 @@ if(DANTESINFERNO_NATIVE_RENDERER)
     set(REXGLUE_USE_VULKAN ON CACHE BOOL "Enable Vulkan graphics backend" FORCE)
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT TARGET rex::rexglue)
+# macOS arm64 debug copy of the iPhone build (blz/ios-audio): same pregenerated code, SDK without host tools.
+option(DANTESINFERNO_PREGENERATED "Use generated/ as is (SDK built without the rexglue tool)" OFF)
+if((CMAKE_SYSTEM_NAME STREQUAL "iOS" OR DANTESINFERNO_PREGENERATED) AND NOT TARGET rex::rexglue)
     # The iOS SDK builds no host tools: codegen runs on a desktop host (Linux/macOS rexglue with the same
     # patched SDK) and generated/ is copied in, so the build's codegen step is a no-op here.
     add_executable(rex::rexglue IMPORTED)
-    set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION /usr/bin/true)
+    set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION /usr/bin/true
+        IMPORTED_LOCATION_RELWITHDEBINFO /usr/bin/true IMPORTED_LOCATION_RELEASE /usr/bin/true)
 endif()
 
 include(generated/rexglue.cmake)
@@ -126,6 +129,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
                 "$<TARGET_BUNDLE_CONTENT_DIR:dantes_inferno>/Frameworks/librexgpu-xenos.dylib"
         VERBATIM)
     target_link_options(dantes_inferno PRIVATE "-Wl,-rpath,@executable_path/Frameworks")
+endif()
+option(DANTESINFERNO_AUDIO_DIAG "Audio diagnostics hooks (src/audio_diag.cpp), never in releases" OFF)
+if(DANTESINFERNO_AUDIO_DIAG)
+    target_sources(dantes_inferno PRIVATE src/audio_diag.cpp)
 endif()
 if(DANTESINFERNO_DEV_CHEATS)
     target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_DEV_CHEATS)
