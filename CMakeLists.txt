@@ -59,6 +59,7 @@ endif()
 
 set(DANTESINFERNO_SOURCES
     src/main.cpp
+    src/autopilot_input.cpp
     src/animation_hooks.cpp
     src/damage_hooks.cpp
     src/frame_rate_hooks.cpp
@@ -144,6 +145,17 @@ if(DANTESINFERNO_AUDIO_DIAG)
 endif()
 if(DANTESINFERNO_DEV_CHEATS)
     target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_DEV_CHEATS)
+    # In-game cheat menu (L3+R3 / three-finger tap / F3): src/cheats, src/overlay/cheat_menu.
+    target_sources(dantes_inferno PRIVATE
+        src/cheats/cheats.cpp
+        src/cheats/cheat_hooks.cpp
+        src/overlay/cheat_menu.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        enable_language(OBJCXX)
+        target_sources(dantes_inferno PRIVATE src/cheats/cheat_touch_ios.mm)
+        set_source_files_properties(src/cheats/cheat_touch_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(dantes_inferno PRIVATE "-framework UIKit")
+    endif()
 endif()
 
 target_include_directories(dantes_inferno PRIVATE
