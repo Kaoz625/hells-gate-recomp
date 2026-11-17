@@ -1,0 +1,95 @@
+From e0e70d6de1edb4519db16171816b1ab7564319cb Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 09:00:21 -0500
+Subject: [PATCH] codegen: real fences for PPC sync/lwsync/eieio on ARM64
+ (no-op on x86); XMA decode outcome diag
+
+---
+ resources/templates/codegen/pch_h.inja | 18 ++++++++++++++++++
+ src/audio/xma_context.cpp              |  9 +++++++++
+ src/codegen/builders/system.cpp        | 12 ++++++------
+ 3 files changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 2a61fc7..c04fafc 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -142,6 +142,24 @@ extern PPCFuncMapping PPCFuncMappings[];
+ #define REX_PHYS_HOST_OFFSET(addr) 0u
+ #endif
+ 
++//=============================================================================
++// PPC memory-ordering barriers (sync / lwsync / eieio)
++//=============================================================================
++// PowerPC is weakly ordered and guest producer/consumer code (audio mixers, job queues, GPU fences) relies on these
++// barriers. x86-TSO tolerates emitting nothing; ARM64 (iPhone, Android, Apple silicon) does not: without real fences
++// the Dante's Inferno mixer's ring was read before its samples were visible and every other XMA frame came out
++// silent on iPhone (17 Nov 2026). Same idea as deivid22srk/hells-gate-recomp-android's fences.
++#if defined(__aarch64__) || defined(_M_ARM64)
++#include <atomic>
++#define REX_SYNC_FENCE() std::atomic_thread_fence(std::memory_order_seq_cst)
++#define REX_LWSYNC_FENCE() std::atomic_thread_fence(std::memory_order_acq_rel)
++#define REX_EIEIO_FENCE() std::atomic_thread_fence(std::memory_order_release)
++#else
++#define REX_SYNC_FENCE() ((void)0)
++#define REX_LWSYNC_FENCE() ((void)0)
++#define REX_EIEIO_FENCE() ((void)0)
++#endif
++
+ #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
+ 
+ #define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 0ca65fb..909d2b7 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -536,6 +536,15 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+     return false;
+   }
+   ret = avcodec_receive_frame(av_context, av_frame);
++  {
++    // Decode outcomes (blz/ios audio diagnostics), logged every 2000 packets.
++    static std::atomic<uint64_t> ok{0}, again{0}, total{0};
++    if (ret == AVERROR(EAGAIN)) again.fetch_add(1); else if (ret >= 0) ok.fetch_add(1);
++    if (total.fetch_add(1) % 2000 == 1999) {
++      REXAPU_INFO("XMA-DECODE: last 2000 packets: {} frames, {} EAGAIN, nb_samples {}", ok.exchange(0),
++                  again.exchange(0), ret >= 0 ? av_frame->nb_samples : -1);
++    }
++  }
+ 
+   if (ret == AVERROR(EAGAIN)) {
+     return false;
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index c7bd789..567c1e0 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -359,20 +359,20 @@ bool build_attn(BuilderContext& ctx) {
+ }
+ 
+ bool build_sync(BuilderContext& ctx) {
+-  // Memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // PPC sync (full barrier): a real fence on weakly-ordered hosts (ARM64), nothing on x86 (pch: REX_*_FENCE).
++  ctx.println("\tREX_SYNC_FENCE();");
+   return true;
+ }
+ 
+ bool build_lwsync(BuilderContext& ctx) {
+-  // Lightweight memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // PPC lwsync (acquire/release): a real fence on weakly-ordered hosts (ARM64), nothing on x86 (pch: REX_*_FENCE).
++  ctx.println("\tREX_LWSYNC_FENCE();");
+   return true;
+ }
+ 
+ bool build_eieio(BuilderContext& ctx) {
+-  // Enforce in-order execution of I/O, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // PPC eieio (store-store): a real fence on weakly-ordered hosts (ARM64), nothing on x86 (pch: REX_*_FENCE).
++  ctx.println("\tREX_EIEIO_FENCE();");
+   return true;
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+
