@@ -488,6 +488,12 @@ void OnBackground() {
   if (!g_started || Disabled()) return;
   std::unique_lock<std::mutex> lock(g_mu, std::try_to_lock);
   if (!lock.owns_lock()) return;  // a send is already running
+  std::string sig = Signature();  // never send a save the game is still writing
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  if (Signature() != sig) {
+    Log("background: save still being written - the next start sends it");
+    return;
+  }
   SendIfChanged("background", 3000);
 }
 
