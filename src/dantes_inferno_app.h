@@ -97,6 +97,15 @@ class DantesInfernoApp : public rex::ReXApp {
 
   void OnConfigurePaths(rex::PathConfig& paths) override {
     user_paths::Configure(paths);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // iPhone/iPad: a dantes_inferno.toml in Documents (Files app / devicectl) replaces the one in the app bundle,
+    // so settings can be changed without reinstalling.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+      std::error_code toml_ec;
+      auto documents_toml = std::filesystem::path(home) / "Documents" / "dantes_inferno.toml";
+      if (std::filesystem::is_regular_file(documents_toml, toml_ec)) paths.config_path = documents_toml;
+    }
+#endif
     if (!paths.game_data_root.empty()) return;
 
     std::error_code config_ec;

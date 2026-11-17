@@ -1,7 +1,7 @@
 From 50a69c5b894aaa9e515abcb8375175266b494ce5 Mon Sep 17 00:00:00 2001
 From: blz <blz@local>
 Date: Tue, 17 Nov 2026 04:32:28 -0500
-Subject: [PATCH 4/5] our Apple fixes: SPIR-V exp bias word 3 (MoltenVK
+Subject: [PATCH 4/7] our Apple fixes: SPIR-V exp bias word 3 (MoltenVK
  textures), iOS stereo fold
 
 ---

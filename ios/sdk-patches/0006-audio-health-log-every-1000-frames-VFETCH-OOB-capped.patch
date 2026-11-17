@@ -1,0 +1,72 @@
+From 3264b0b4abf258c558f4acc72a20e10c1c47b538 Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 05:16:31 -0500
+Subject: [PATCH 6/7] audio health log every 1000 frames; VFETCH-OOB capped at
+ 50 lines
+
+---
+ src/audio/sdl/sdl_audio_driver.cpp | 23 +++++++++++++++++++++++
+ src/graphics/command_processor.cpp |  6 ++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 02d9572..a643af4 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cmath>
+ #include <cstring>
+ 
+ #include <rex/assert.h>
+@@ -134,6 +135,28 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ 
+   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
+ 
++  // Audio health, every 1000 guest frames (~5 s at 48 kHz/256): proves whether the guest submits audio, how loud
++  // it is (guest floats are big-endian), and whether SDL starves - "no sound" reports start here (blz/ios).
++  {
++    static uint32_t diag_frames = 0;
++    static float diag_peak = 0.0f;
++    const auto* words = reinterpret_cast<const uint32_t*>(output_frame);
++    for (uint32_t i = 0; i < frame_samples_; i += 8) {
++      uint32_t w = words[i];
++      w = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
++      float v;
++      std::memcpy(&v, &w, sizeof(v));
++      if (v == v) diag_peak = std::max(diag_peak, std::fabs(v));
++    }
++    if (++diag_frames % 1000 == 0) {
++      std::unique_lock<std::mutex> guard(frames_mutex_);
++      REXAPU_INFO("APU-DIAG: guest frames {} peak {:.4f} queued {} underruns {} silent_buffers {} mute {}",
++                  diag_frames, diag_peak, frames_queued_.size(), underruns_, silent_buffers_,
++                  REXCVAR_GET(audio_mute));
++      diag_peak = 0.0f;
++    }
++  }
++
+   static uint32_t sdl_submit_count = 0;
+   if (sdl_submit_count < 10) {
+     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 3cb0675..db41209 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1632,6 +1632,12 @@ void CommandProcessor::TraceVertexFetchOOB(const Shader& vertex_shader,
+     if (!reported.insert(signature).second) {
+       continue;
+     }
++    // Hard cap: Dante's Inferno produces thousands of distinct signatures per minute, and on a phone the log
++    // writes (5 MB rotations) cost frame time (blz/ios).
++    static std::atomic<uint32_t> vfetch_oob_logged{0};
++    if (vfetch_oob_logged.fetch_add(1, std::memory_order_relaxed) >= 50) {
++      continue;
++    }
+     REXGPU_WARN(
+         "VFETCH-OOB: indices={} fetch={} base=0x{:08X} size={}w stride={}w "
+         "max_index={} -> last word {} of {}{}",
+-- 
+2.54.0 (Apple Git-157)
+

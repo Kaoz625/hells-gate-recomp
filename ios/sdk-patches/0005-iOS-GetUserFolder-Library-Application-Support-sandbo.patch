@@ -1,7 +1,7 @@
 From c7a348841044de86f9b4bd602f82e51d7f8ee69a Mon Sep 17 00:00:00 2001
 From: blz <blz@local>
 Date: Tue, 17 Nov 2026 04:49:29 -0500
-Subject: [PATCH 5/5] iOS: GetUserFolder = ~/Library/Application Support
+Subject: [PATCH 5/7] iOS: GetUserFolder = ~/Library/Application Support
  (sandbox has no ~/.local/share)
 
 ---

@@ -1,0 +1,205 @@
+From 56c263a711d590c6f3480629403947d371773071 Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 06:30:57 -0500
+Subject: [PATCH 7/7] diagnostics: GPU-SYNC line every 300 swaps (submits/fence
+ waits per caller, WAIT_REG_MEM + ring-empty wait time)
+
+---
+ .../rex/graphics/vulkan/command_processor.h   |  8 +--
+ src/graphics/command_processor.cpp            | 17 ++++++
+ src/graphics/vulkan/command_processor.cpp     | 59 ++++++++++++++++++-
+ 3 files changed, 78 insertions(+), 6 deletions(-)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 696ff48..6d6f6d9 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -406,7 +406,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Rechecks submission number and reclaims per-submission resources. Pass 0 as
+   // the submission to await to simply check status, or pass
+   // GetCurrentSubmission() to wait for all queue operations to be completed.
+-  void CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission);
++  void CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission, int diag_line = __builtin_LINE());
+   // If is_guest_command is true, a new full frame - with full cleanup of
+   // resources and, if needed, starting capturing - is opened if pending (as
+   // opposed to simply resuming after mid-frame synchronization). Returns
+@@ -415,9 +415,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // If is_swap is true, a full frame is closed - with, if needed, cache
+   // clearing and stopping capturing. Returns whether the submission was done
+   // successfully, if it has failed, leaves it open.
+-  bool EndSubmission(bool is_swap);
+-  bool AwaitAllQueueOperationsCompletion() {
+-    CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
++  bool EndSubmission(bool is_swap, int diag_line = __builtin_LINE());
++  bool AwaitAllQueueOperationsCompletion(int diag_line = __builtin_LINE()) {
++    CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission(), -diag_line);
+     return !submission_open_ && submissions_in_flight_fences_.empty();
+   }
+   // Keep primary-buffer-end submit behavior aligned with D3D12: only submit
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index db41209..b72915a 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -257,6 +257,11 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+                     "pipelines are being prepared.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++namespace rex::graphics {
++// GPU thread wait timing (blz/ios diagnostics, reported by the Vulkan IssueSwap every 300 swaps).
++std::atomic<uint64_t> g_diag_wrm_us{0}, g_diag_wrm_waits{0}, g_diag_ring_us{0}, g_diag_ring_waits{0};
++}  // namespace rex::graphics
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;
+@@ -399,6 +404,7 @@ void CommandProcessor::WorkerThreadMain() {
+       // We spin here waiting for new ones, as the overhead of waiting on our
+       // event is too high.
+       PrepareForWait();
++      const auto diag_ring_t0 = std::chrono::steady_clock::now();
+       uint32_t loop_count = 0;
+       do {
+         // If we spin around too much, revert to a "low-power" state.
+@@ -413,6 +419,10 @@ void CommandProcessor::WorkerThreadMain() {
+         write_ptr_index = write_ptr_index_.load();
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
++      g_diag_ring_waits.fetch_add(1, std::memory_order_relaxed);
++      g_diag_ring_us.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                            std::chrono::steady_clock::now() - diag_ring_t0).count()),
++                               std::memory_order_relaxed);
+       ReturnFromWait();
+       if (!worker_running_ || !pending_fns_.empty()) {
+         continue;
+@@ -1240,6 +1250,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+   uint32_t wait_iterations = 0;
+ 
+   bool matched = false;
++  const auto diag_wrm_t0 = std::chrono::steady_clock::now();
+   do {
+     ++wait_iterations;
+     // Read before the condition, so a vblank between the check and the wait
+@@ -1316,6 +1327,12 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+       }
+     }
+   } while (!matched);
++  if (wait_iterations > 1) {
++    g_diag_wrm_waits.fetch_add(1, std::memory_order_relaxed);
++    g_diag_wrm_us.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                         std::chrono::steady_clock::now() - diag_wrm_t0).count()),
++                            std::memory_order_relaxed);
++  }
+   if (wait_iterations > 1) {
+     InventoryAdd(fmt::format("WAIT_REG_MEM had to wait: {} {:08X}", is_memory ? "mem" : "reg",
+                              poll_reg_addr));
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index c0dd5b1..bff1924 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -14,6 +14,8 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <iterator>
++#include <chrono>
++#include <map>
+ #include <mutex>
+ #include <string>
+ #include <string_view>
+@@ -69,6 +71,44 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++namespace {
++// GPU sync health (blz/ios, 17 Nov 2026): per caller line, how many submissions end and how long the CPU blocks in
++// vkWaitForFences. Line 0 = swap submit; a negative line = a full drain (AwaitAllQueueOperationsCompletion) called
++// from that line. Logged every 300 swaps by IssueSwap.
++}  // namespace
++namespace rex::graphics {
++extern std::atomic<uint64_t> g_diag_wrm_us, g_diag_wrm_waits, g_diag_ring_us, g_diag_ring_waits;
++}  // namespace rex::graphics
++namespace {
++struct SyncDiag {
++  enum Kind { kSubmit, kWait };
++  struct Entry { uint64_t submits = 0, waits = 0, wait_us = 0; };
++  static SyncDiag& Get() { static SyncDiag d; return d; }
++  void Record(int line, Kind kind, uint64_t us) {
++    std::lock_guard<std::mutex> lock(mutex);
++    Entry& e = entries[line];
++    if (kind == kSubmit) ++e.submits; else { ++e.waits; e.wait_us += us; }
++  }
++  void Report(uint64_t swaps, double seconds) {
++    std::lock_guard<std::mutex> lock(mutex);
++    std::string line = fmt::format("GPU-SYNC: {} swaps in {:.1f} s ({:.1f} fps):", swaps, seconds,
++                                   seconds > 0 ? swaps / seconds : 0.0);
++    for (auto& [l, e] : entries) {
++      line += fmt::format(" [{}{}: sub {} wait {} {:.0f}ms]", l < 0 ? "drain@" : "@", l < 0 ? -l : l, e.submits,
++                          e.waits, e.wait_us / 1000.0);
++    }
++    using namespace rex::graphics;
++    line += fmt::format(" | WAIT_REG_MEM {} waits {:.0f}ms | ring empty {} waits {:.0f}ms",
++                        g_diag_wrm_waits.exchange(0), g_diag_wrm_us.exchange(0) / 1000.0,
++                        g_diag_ring_waits.exchange(0), g_diag_ring_us.exchange(0) / 1000.0);
++    REXGPU_INFO("{}", line);
++    entries.clear();
++  }
++  std::mutex mutex;
++  std::map<int, Entry> entries;
++};
++}  // namespace
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+@@ -2271,6 +2311,16 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+ 
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
++  {
++    static uint64_t diag_swaps = 0;
++    static auto diag_start = std::chrono::steady_clock::now();
++    if (++diag_swaps == 300) {
++      auto now = std::chrono::steady_clock::now();
++      SyncDiag::Get().Report(diag_swaps, std::chrono::duration<double>(now - diag_start).count());
++      diag_swaps = 0;
++      diag_start = now;
++    }
++  }
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+@@ -4969,7 +5019,7 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+   sample_counts->StencilFail_B = 0;
+ }
+ 
+-void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
++void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission, int diag_line) {
+   // Only report once, no need to retry a wait that won't succeed anyway.
+   if (device_lost_) {
+     return;
+@@ -4996,9 +5046,13 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+     // defined by vkQueueSubmit additionally include in the first
+     // synchronization scope all commands that occur earlier in submission
+     // order."
++    const auto diag_t0 = std::chrono::steady_clock::now();
+     VkResult wait_result =
+         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
++    SyncDiag::Get().Record(diag_line, SyncDiag::kWait,
++                           uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                        std::chrono::steady_clock::now() - diag_t0).count()));
+     if (wait_result == VK_SUCCESS) {
+       fences_awaited += await_submission - submission_completed_;
+     } else {
+@@ -5255,7 +5309,8 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   return true;
+ }
+ 
+-bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
++bool VulkanCommandProcessor::EndSubmission(bool is_swap, int diag_line) {
++  SyncDiag::Get().Record(is_swap ? 0 : diag_line, SyncDiag::kSubmit, 0);
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+-- 
+2.54.0 (Apple Git-157)
+
