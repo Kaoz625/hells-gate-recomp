@@ -26,8 +26,8 @@ constexpr Cheat kCheats[] = {
     {"dante_cheat_inf_health", "Infinite health", "Health refills to full on every hit"},
     {"dante_cheat_one_hit", "One-hit kills", "Any hit kills an enemy"},
     {"dante_cheat_inf_mana", "Infinite magic", "Magic stays full"},
-    {"dante_cheat_max_souls", "Max souls", "Souls set to the maximum when they change"},
-    {"dante_cheat_max_level", "Max Holy + Unholy", "Holy and Unholy power to the top level"},
+    {"dante_cheat_max_souls", "Max souls", "999,999 souls - buy every Holy and Unholy ability"},
+    {"dante_cheat_redemption", "Instant redemption", "Redemption fills at once (from the 360 trainer)"},
 };
 
 std::filesystem::path g_file;

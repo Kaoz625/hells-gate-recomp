@@ -31,7 +31,9 @@ REXCVAR_DEFINE_BOOL(dante_cheat_inf_health, false, "Cheats",
                     "The player's health refills to full on every change (hits still land)");
 REXCVAR_DEFINE_BOOL(dante_cheat_inf_mana, false, "Cheats", "Magic stays full");
 REXCVAR_DEFINE_BOOL(dante_cheat_max_souls, false, "Cheats", "Souls go to the maximum when they change");
-REXCVAR_DEFINE_BOOL(dante_cheat_max_level, false, "Cheats", "Holy and Unholy power go to the top");
+REXCVAR_DEFINE_BOOL(dante_cheat_redemption, false, "Cheats",
+                    "Redemption fills at once (the trainer's 'Instant Inf Redemption': SetStat from 0x822AEA88 / "
+                    "0x822AEE54 set to 1300)");
 REXCVAR_DEFINE_BOOL(dante_stat_trace, false, "Diagnostics",
                     "Log player stat changes (SetStat sub_82306E28): id, address, caller, old/new value, range");
 
@@ -44,7 +46,26 @@ using namespace guest;
 // Damage component (sub_82239018).
 constexpr uint32_t kComponentOwner = 72, kHealth = 44, kHealthMax = 48;
 // Stat (sub_82306E28).
+// The value is clamped to [+12, +8] (an unbounded stat has +8 = FLT_MAX).
 constexpr uint32_t kStatId = 0, kStatValue = 4, kStatMin = 8, kStatMax = 12, kStatFlags = 16;
+constexpr uint32_t kStatCap = 8;
+
+// Stat ids (FindStat r4), read off Markus's save on 17 Nov with dante_stat_trace + a guest memory dump:
+// souls 62ACCAC2 = 1487 with the HUD as listener (74508953 / F2392A95 hold the same number: totals),
+// magic 77BF595C = 66 of cap 350 (its cap stat 5C5A06AF = 350 sits next to it in the magic code, sub at
+// recomp.54 with 420B4AAD).
+constexpr uint32_t kSoulsId = 0x62ACCAC2, kMagicId = 0x77BF595C;
+constexpr float kMaxSouls = 999999.0f;  // the trainer's "Max Money" value
+// Trainer "Instant Inf Redemption": SetStat calls returning to these addresses (the trainer's 0x8229EA88 /
+// 0x8229EE54 sit 0x10000 lower; its other call-site constants show the same shift), value > 1 -> 1300.
+constexpr uint32_t kRedemptionCallers[] = {0x822AEA88, 0x822AEE54};
+constexpr float kRedemptionValue = 1300.0f;
+
+// Last address FindStat returned for the cheat stats (checked against the id before use).
+std::atomic<uint32_t> g_souls_stat{0}, g_magic_stat{0};
+
+// SetStat(stat, value) called from the game's own thread (the pad hook): the HUD listeners see the change.
+void CallSetStat(PPCContext& parent, uint8_t* base, uint32_t stat, float value);
 
 // X_INPUT_STATE in guest memory: packet number, then the gamepad.
 constexpr uint32_t kPadButtons = 4, kPadSize = 12;
@@ -63,6 +84,21 @@ REX_HOOK_RAW(sub_8281E7B0) {
   if (ctx.r3.u32 != 0 || !IsPlausibleAddress(state)) return;
   if (cheats::OnGuestPad(Load16(base, state + kPadButtons))) {
     std::memset(Ptr(base, state + kPadButtons), 0, kPadSize);
+  }
+  // Souls / magic: topped up once per pad read (every frame) on the game's thread.
+  if (REXCVAR_GET(dante_cheat_max_souls)) {
+    uint32_t stat = g_souls_stat.load(std::memory_order_relaxed);
+    if (IsPlausibleAddress(stat) && Load32(base, stat + kStatId) == kSoulsId &&
+        LoadFloat(base, stat + kStatValue) < kMaxSouls) {
+      CallSetStat(ctx, base, stat, kMaxSouls);
+    }
+  }
+  if (REXCVAR_GET(dante_cheat_inf_mana)) {
+    uint32_t stat = g_magic_stat.load(std::memory_order_relaxed);
+    if (IsPlausibleAddress(stat) && Load32(base, stat + kStatId) == kMagicId) {
+      const float cap = LoadFloat(base, stat + kStatCap);
+      if (cap > 0.0f && cap < 1.0e6f && LoadFloat(base, stat + kStatValue) < cap) CallSetStat(ctx, base, stat, cap);
+    }
   }
 }
 
@@ -98,8 +134,23 @@ REX_HOOK_RAW(sub_82306E28) {
                   LoadFloat(base, stat + kStatMax), Load32(base, stat + kStatFlags));
     }
   }
+  if (REXCVAR_GET(dante_cheat_redemption) && requested > 1.0f) {
+    for (uint32_t caller : kRedemptionCallers) {
+      if (uint32_t(ctx.lr) == caller) ctx.f1.f64 = kRedemptionValue;
+    }
+  }
   __imp__sub_82306E28(ctx, base);
 }
+
+namespace {
+void CallSetStat(PPCContext& parent, uint8_t* base, uint32_t stat, float value) {
+  rex::CallFrame frame(parent);
+  frame.ctx.r3.u64 = stat;
+  frame.ctx.f1.f64 = value;
+  frame.ctx.lr = 0;
+  sub_82306E28(frame, base);
+}
+}  // namespace
 
 // FindStat(set, r4 = stat id, r5 = group): with dante_stat_trace, logs every stat id once with its value, so
 // the ids of souls, magic, Holy/Unholy can be read off a running game.
@@ -108,7 +159,10 @@ REX_HOOK_RAW(sub_82309100) {
   const uint32_t id = ctx.r4.u32;
   const uint32_t lr = uint32_t(ctx.lr);
   __imp__sub_82309100(ctx, base);
-  if (!REXCVAR_GET(dante_stat_trace) || !IsPlausibleAddress(ctx.r3.u32)) return;
+  if (!IsPlausibleAddress(ctx.r3.u32)) return;
+  if (id == kSoulsId) g_souls_stat.store(ctx.r3.u32, std::memory_order_relaxed);
+  if (id == kMagicId) g_magic_stat.store(ctx.r3.u32, std::memory_order_relaxed);
+  if (!REXCVAR_GET(dante_stat_trace)) return;
   static std::mutex mutex;
   static std::unordered_map<uint32_t, uint32_t> seen;
   std::lock_guard lock(mutex);
