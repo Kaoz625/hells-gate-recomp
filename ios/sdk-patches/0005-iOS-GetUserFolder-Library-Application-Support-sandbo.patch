@@ -1,0 +1,31 @@
+From c7a348841044de86f9b4bd602f82e51d7f8ee69a Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 04:49:29 -0500
+Subject: [PATCH 5/5] iOS: GetUserFolder = ~/Library/Application Support
+ (sandbox has no ~/.local/share)
+
+---
+ src/core/filesystem_posix.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+index ef5bdf4..af95820 100644
+--- a/src/core/filesystem_posix.cpp
++++ b/src/core/filesystem_posix.cpp
+@@ -104,6 +104,13 @@ std::filesystem::path GetExecutableFolder() {
+ }
+ 
+ std::filesystem::path GetUserFolder() {
++#if REX_PLATFORM_IOS
++  // iOS sandbox: only Documents, Library and tmp are writable; ~/.local/share is not (create_directories
++  // threw "Operation not permitted" at start-up). Saves, config and logs live in Application Support.
++  if (auto home = rex::platform::env::get("HOME")) {
++    return std::filesystem::path(*home) / "Library" / "Application Support";
++  }
++#endif
+   // get preferred data home
+   if (auto xdg = rex::platform::env::get("XDG_DATA_HOME")) {
+     return std::filesystem::path(*xdg);
+-- 
+2.54.0 (Apple Git-157)
+
