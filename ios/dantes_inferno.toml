@@ -9,3 +9,7 @@ gpu_backend = 'vulkan'
 
 # On-screen FPS counter while the port is being tested (F1 toggles it on a keyboard).
 show_fps_overlay = true
+
+# Cheats (compiled into Markus's builds; true = on, restart the game after changing):
+# dante_cheat_god = true      # take no damage, no knockback
+# dante_cheat_one_hit = true  # every hit kills enemies

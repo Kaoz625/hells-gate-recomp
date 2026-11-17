@@ -17,6 +17,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(DANTESINFERNO_NATIVE_RENDERER OFF CACHE BOOL "" FORCE)
     set(DANTESINFERNO_FIDELITYFX OFF CACHE BOOL "" FORCE)
     set(DANTESINFERNO_BUILD_LAUNCHER OFF CACHE BOOL "" FORCE)
+    # Markus's own builds carry the cheats (god mode, one-hit kills); both stay off until switched on in
+    # dantes_inferno.toml (dante_cheat_god / dante_cheat_one_hit).
+    set(DANTESINFERNO_DEV_CHEATS ON CACHE BOOL "" FORCE)
 endif()
 # God mode / one-hit kills for recording playthroughs; never in releases
 # (package-release.ps1 refuses an exe that has them).
