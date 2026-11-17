@@ -1,0 +1,69 @@
+From 261a3ae7d41bf8a8a35abd6b14cffc199d6a6239 Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 08:34:10 -0500
+Subject: [PATCH] audio_dump_seconds: record the final output mix to
+ Documents/audio_out.f32
+
+---
+ src/audio/sdl/sdl_audio_driver.cpp | 31 ++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index a643af4..985dec1 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -12,6 +12,8 @@
+ #include <algorithm>
+ #include <array>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ 
+ #include <rex/assert.h>
+@@ -29,6 +31,10 @@
+ #include <SDL3/SDL.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
++REXCVAR_DEFINE_INT32(audio_dump_seconds, 0, "Audio",
++                     "Write the first N seconds of the final output mix (float32, interleaved, 48 kHz, after "
++                     "the stereo fold) to audio_out.f32 in the user folder's parent Documents (iOS) or the "
++                     "working directory, to diagnose distortion");
+ 
+ namespace rex::audio::sdl {
+ 
+@@ -251,6 +257,31 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+             break;
+         }
+       }
++      {
++        static std::FILE* dump = nullptr;
++        static uint64_t dump_bytes_left = 0;
++        static bool dump_started = false;
++        if (!dump_started && REXCVAR_GET(audio_dump_seconds) > 0) {
++          dump_started = true;
++          std::string path = "audio_out.f32";
++          if (const char* home = std::getenv("HOME")) path = std::string(home) + "/Documents/audio_out.f32";
++          dump = std::fopen(path.c_str(), "wb");
++          dump_bytes_left = uint64_t(REXCVAR_GET(audio_dump_seconds)) * frame_frequency_ *
++                            driver->sdl_device_channels_ * sizeof(float);
++          REXAPU_INFO("audio dump: {} ({} s, {} ch)", path, REXCVAR_GET(audio_dump_seconds),
++                      int(driver->sdl_device_channels_));
++        }
++        if (dump) {
++          size_t n = std::min<uint64_t>(dump_bytes_left, uint64_t(len));
++          std::fwrite(data, 1, n, dump);
++          dump_bytes_left -= n;
++          if (!dump_bytes_left) {
++            std::fclose(dump);
++            dump = nullptr;
++            REXAPU_INFO("audio dump finished");
++          }
++        }
++      }
+       if (!SDL_PutAudioStreamData(stream, data, len)) {
+         REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
+         driver->frames_unused_.push(buffer);
+-- 
+2.54.0 (Apple Git-157)
+
