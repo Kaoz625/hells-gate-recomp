@@ -1,0 +1,210 @@
+From b839c0a2b5102ca2846bfa0dd08bc84c14fd4675 Mon Sep 17 00:00:00 2001
+From: Mark Anthony <markususeche@gmail.com>
+Date: Tue, 17 Nov 2026 10:35:16 -0500
+Subject: [PATCH] audio: pace render callbacks to real time (fixes Dante 1100
+ audio); per-frame audio diagnostics behind audio_diagnostics
+
+The audio worker ran 2-4 guest render callbacks back to back whenever the device
+pulled several frames at once. Dante's Inferno's mixer only had new data for every
+other 512-sample block in such a burst (2 frames sound, 2 silent = 1100), on iPhone
+and on macOS arm64 and x86_64 alike. Callbacks now run one per 5.33 ms, keeping
+about 8 frames queued at the device (audio_pace_callbacks, default on).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/rex/audio/audio_driver.h         |  2 ++
+ include/rex/audio/audio_system.h         |  4 +++
+ include/rex/audio/sdl/sdl_audio_driver.h |  4 +++
+ src/audio/audio_system.cpp               | 41 ++++++++++++++++++++++++
+ src/audio/sdl/sdl_audio_driver.cpp       |  5 ++-
+ src/audio/xma_context.cpp                |  6 ++--
+ 6 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/audio/audio_driver.h b/include/rex/audio/audio_driver.h
+index 37ccbf2..067ce7d 100644
+--- a/include/rex/audio/audio_driver.h
++++ b/include/rex/audio/audio_driver.h
+@@ -22,6 +22,8 @@ class AudioDriver {
+   virtual ~AudioDriver();
+ 
+   virtual void SubmitFrame(uint32_t samples_ptr) = 0;
++  // Frames submitted but not yet played, or -1 when the backend does not know (callback pacing).
++  virtual int queued_frames() { return -1; }
+ 
+  protected:
+   inline uint8_t* TranslatePhysical(uint32_t guest_address) const {
+diff --git a/include/rex/audio/audio_system.h b/include/rex/audio/audio_system.h
+index 33fd32c..47e9198 100644
+--- a/include/rex/audio/audio_system.h
++++ b/include/rex/audio/audio_system.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include <atomic>
+ #include <queue>
+ 
+@@ -61,6 +62,7 @@ class AudioSystem : public system::IAudioSystem {
+   virtual void Initialize();
+ 
+   void WorkerThreadMain();
++  void PaceClientCallback(size_t index, int queued);
+ 
+   virtual X_STATUS CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
+                                 AudioDriver** out_driver) = 0;
+@@ -89,6 +91,8 @@ class AudioSystem : public system::IAudioSystem {
+   int FindFreeClient();
+ 
+   std::unique_ptr<rex::thread::Semaphore> client_semaphores_[kMaximumClientCount];
++  // Real-time pacing of each client's render callback (audio worker thread only).
++  std::chrono::steady_clock::time_point client_next_callback_[kMaximumClientCount] = {};
+   // Event is always there in case we have no clients.
+   std::unique_ptr<rex::thread::Event> shutdown_event_;
+   rex::thread::WaitHandle* wait_handles_[kMaximumClientCount + 1];
+diff --git a/include/rex/audio/sdl/sdl_audio_driver.h b/include/rex/audio/sdl/sdl_audio_driver.h
+index 33c43c2..fd2de94 100644
+--- a/include/rex/audio/sdl/sdl_audio_driver.h
++++ b/include/rex/audio/sdl/sdl_audio_driver.h
+@@ -26,6 +26,10 @@ namespace rex::audio::sdl {
+ 
+ class SDLAudioDriver : public AudioDriver {
+  public:
++  int queued_frames() override {
++    std::unique_lock<std::mutex> guard(frames_mutex_);
++    return static_cast<int>(frames_queued_.size());
++  }
+   SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore);
+   ~SDLAudioDriver() override;
+ 
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 21c7a94..3256555 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -27,7 +27,13 @@
+ #include <rex/system/thread_state.h>
+ #include <rex/thread.h>
+ #include <rex/cvar.h>
++#include <chrono>
++#include <thread>
+ 
++REXCVAR_DEFINE_BOOL(
++    audio_pace_callbacks, true, "Audio",
++    "Run each client's render callback at most once per guest audio frame (256 samples = 5.33 ms) of real time "
++    "instead of back to back when the output device frees several frames at once");
+ REXCVAR_DEFINE_INT32(
+     audio_maxqframes, 32, "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+@@ -100,6 +106,38 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
+   return X_STATUS_SUCCESS;
+ }
+ 
++// The guest's audio engine expects its render callback about every 5.33 ms, as on the console. When the output device
++// pulls several frames at once (CoreAudio on macOS 4 frames per pull, iOS likewise), the worker ran 2-4 callbacks
++// back to back in well under a millisecond, and Dante's Inferno's mixer (XMA voices kicked and refilled between
++// passes) only had new data for every other 512-sample block: the output went 1100 1100... (2 frames sound, 2 silent),
++// heard as harsh distortion that never stops (iPhone 15 Pro Max and M1 Mac, arm64 and x86_64 alike, 17 Nov 2026).
++// Pacing the callbacks to real time keeps the queue a few frames deep and the mix whole.
++void AudioSystem::PaceClientCallback(size_t index, int queued) {
++  if (!REXCVAR_GET(audio_pace_callbacks) || index >= kMaximumClientCount) {
++    return;
++  }
++  using Clock = std::chrono::steady_clock;
++  constexpr auto kFrame = std::chrono::nanoseconds(1000000000ll * 256 / 48000);
++  // Keep about this many frames (43 ms) queued at the device: a real-time pace above it, 10% faster below it.
++  // The queue never reaches audio_maxqframes, so the device's own multi-frame pulls never release a burst.
++  constexpr int kTargetQueued = 8;
++  auto& next_due = client_next_callback_[index];
++  auto now = Clock::now();
++  if (queued >= 0 && queued < kTargetQueued / 2) {
++    // Start-up or after a stall: fill to half the target at once.
++    next_due = now;
++    return;
++  }
++  const auto interval = (queued >= 0 && queued < kTargetQueued) ? kFrame * 9 / 10 : kFrame;
++  if (next_due > now) {
++    std::this_thread::sleep_until(next_due);
++    now = next_due;
++  } else if (now - next_due > kFrame * 4) {
++    next_due = now;
++  }
++  next_due += interval;
++}
++
+ void AudioSystem::WorkerThreadMain() {
+ #if REX_PLATFORM_MAC || REX_PLATFORM_IOS
+   // This thread feeds the output device every few milliseconds and uses little
+@@ -146,6 +184,8 @@ void AudioSystem::WorkerThreadMain() {
+       auto global_lock = global_critical_region_.Acquire();
+       uint32_t client_callback = clients_[index].callback;
+       uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
++      const int client_queued =
++          clients_[index].driver ? clients_[index].driver->queued_frames() : -1;
+       global_lock.unlock();
+ 
+       if (client_callback) {
+@@ -154,6 +194,7 @@ void AudioSystem::WorkerThreadMain() {
+                        client_callback, client_callback_arg, index);
+         }
+         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
++        PaceClientCallback(index, client_queued);
+         uint64_t args[] = {client_callback_arg};
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 352898b..0dc15a4 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -34,6 +34,8 @@
+ #include <SDL3/SDL.h>
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
++REXCVAR_DEFINE_BOOL(audio_diagnostics, false, "Audio",
++                    "Log audio health (APU-DIAG every 1000 frames, APU-PATTERN of silent frames, XMA output rate)");
+ REXCVAR_DEFINE_INT32(audio_dump_seconds, 0, "Audio",
+                      "Write the first N seconds of the final output mix (float32, interleaved, 48 kHz, after "
+                      "the stereo fold) to audio_out.f32 in the user folder's parent Documents (iOS) or the "
+@@ -155,7 +157,8 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ 
+   // Audio health, every 1000 guest frames (~5 s at 48 kHz/256): proves whether the guest submits audio, how loud
+   // it is (guest floats are big-endian), and whether SDL starves - "no sound" reports start here (blz/ios).
+-  {
++  // Off unless audio_diagnostics is set: it reads every frame.
++  if (REXCVAR_GET(audio_diagnostics)) {
+     uint32_t& diag_frames = diag_frames_;
+     float& diag_peak = diag_peak_;
+     const auto* words = reinterpret_cast<const uint32_t*>(output_frame);
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 909d2b7..a5b37c9 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -38,6 +38,8 @@ extern "C" {
+ // Credits for most of this code goes to:
+ // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
+ 
++REXCVAR_DECLARE(bool, audio_diagnostics);
++
+ namespace rex::audio {
+ 
+ using stream::BitStream;
+@@ -467,7 +469,7 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
+ 
+   output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
+                    subframes_to_write * kOutputBytesPerBlock);
+-  {
++  if (REXCVAR_GET(audio_diagnostics)) {
+     // Decoded output volume (blz/ios audio diagnostics), logged every 5 s.
+     static std::atomic<uint64_t> bytes{0}, writes{0};
+     static std::atomic<int64_t> window_start{0};
+@@ -536,7 +538,7 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
+     return false;
+   }
+   ret = avcodec_receive_frame(av_context, av_frame);
+-  {
++  if (REXCVAR_GET(audio_diagnostics)) {
+     // Decode outcomes (blz/ios audio diagnostics), logged every 2000 packets.
+     static std::atomic<uint64_t> ok{0}, again{0}, total{0};
+     if (ret == AVERROR(EAGAIN)) again.fetch_add(1); else if (ret >= 0) ok.fetch_add(1);
+-- 
+2.54.0 (Apple Git-157)
+
