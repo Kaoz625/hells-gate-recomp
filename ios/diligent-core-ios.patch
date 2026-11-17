@@ -1,0 +1,73 @@
+diff --git a/Graphics/GraphicsEngineVulkan/CMakeLists.txt b/Graphics/GraphicsEngineVulkan/CMakeLists.txt
+index 353157c..4b27c47 100644
+--- a/Graphics/GraphicsEngineVulkan/CMakeLists.txt
++++ b/Graphics/GraphicsEngineVulkan/CMakeLists.txt
+@@ -270,8 +270,9 @@ elseif(PLATFORM_IOS OR PLATFORM_TVOS)
+     find_library(QUARTZ_CORE QuartzCore)
+     find_library(UI_KIT UIKit)
+     find_library(IO_SURFACE IOSurface)
+-    # Note that volk may be defined by external CMake, but we don't use it on iOS/tvOS
+-    list(APPEND PRIVATE_DEPENDENCIES ${MOLTENVK_LIBRARY} ${CORE_GRAPHICS} ${METAL_LIBRARY} ${QUARTZ_CORE} ${UI_KIT} ${IO_SURFACE})
++    # iOS (Hell's Gate blz/ios-native): volk, initialized from the app's MoltenVK (Instance.cpp LoadVulkan), so the
++    # Vulkan 1.1+ entry points and extensions are reachable (without volk Diligent caps itself at Vulkan 1.0).
++    list(APPEND PRIVATE_DEPENDENCIES volk::volk ${CORE_GRAPHICS} ${METAL_LIBRARY} ${QUARTZ_CORE} ${UI_KIT} ${IO_SURFACE})
+ elseif(PLATFORM_LINUX)
+     list(APPEND PRIVATE_DEPENDENCIES volk::volk)
+ elseif(PLATFORM_ANDROID)
+@@ -318,7 +319,9 @@ elseif(PLATFORM_LINUX)
+     set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
+ elseif(PLATFORM_MACOS)
+     set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
+-elseif(PLATFORM_IOS OR PLATFORM_TVOS)
++elseif(PLATFORM_IOS)
++    set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
++elseif(PLATFORM_TVOS)
+ elseif(PLATFORM_ANDROID)
+     set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
+ else()
+diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
+index 4534337..a6542cb 100644
+--- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/Instance.cpp
+@@ -251,12 +251,28 @@ std::shared_ptr<Instance> Instance::Create(const CreateInfo& CI)
+ }
+ 
+ #if DILIGENT_USE_VOLK
++#if PLATFORM_IOS
++#    include <dlfcn.h>
++#endif
+ static bool LoadVulkan()
+ {
+     static bool VulkanLoaded = false;
+     if (VulkanLoaded)
+         return true;
+ 
++#if PLATFORM_IOS
++    // iOS: MoltenVK ships inside the app (Frameworks/libMoltenVK.dylib); volk's own search (libvulkan.dylib, a
++    // bare libMoltenVK.dylib) does not look there. Load that copy - the one the rest of the app uses.
++    if (void* Lib = dlopen("@executable_path/Frameworks/libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL))
++    {
++        if (auto GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(Lib, "vkGetInstanceProcAddr")))
++        {
++            volkInitializeCustom(GetInstanceProcAddr);
++            VulkanLoaded = true;
++            return true;
++        }
++    }
++#endif
+     VulkanLoaded = (volkInitialize() == VK_SUCCESS);
+     return VulkanLoaded;
+ }
+diff --git a/ThirdParty/CMakeLists.txt b/ThirdParty/CMakeLists.txt
+index 83655bb..4bf1b84 100644
+--- a/ThirdParty/CMakeLists.txt
++++ b/ThirdParty/CMakeLists.txt
+@@ -147,7 +147,7 @@ else()
+     set(DILIGENT_USE_SPIRV_TOOLCHAIN FALSE CACHE INTERNAL "")
+ endif()
+ 
+-if (VULKAN_SUPPORTED AND (PLATFORM_WIN32 OR PLATFORM_LINUX OR PLATFORM_MACOS OR PLATFORM_ANDROID) AND (NOT TARGET volk::volk))
++if (VULKAN_SUPPORTED AND (PLATFORM_WIN32 OR PLATFORM_LINUX OR PLATFORM_MACOS OR PLATFORM_ANDROID OR PLATFORM_IOS) AND (NOT TARGET volk::volk))
+     include(../BuildTools/CMake/VulkanUtils.cmake)
+     set(VOLK_PULL_IN_VULKAN OFF)
+     set(VOLK_INSTALL OFF)
