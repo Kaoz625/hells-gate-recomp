@@ -1,0 +1,48 @@
+From 59f9eeec7ebf7ec6c0cbbe5e92330c3e0260d2b0 Mon Sep 17 00:00:00 2001
+From: Mark Anthony <markususeche@gmail.com>
+Date: Tue, 17 Nov 2026 12:20:26 -0500
+Subject: [PATCH] audio: pacing queue target is a cvar
+ (audio_pace_target_frames, default 12 = 64 ms): 8 frames underran in 55-140
+ ms game stalls on the iPhone (5-15 gaps per 30 s)
+
+---
+ src/audio/audio_system.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 36b6f0c..ee28e55 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -34,6 +34,11 @@ REXCVAR_DEFINE_BOOL(
+     audio_pace_callbacks, true, "Audio",
+     "Run each client's render callback at most once per guest audio frame (256 samples = 5.33 ms) of real time "
+     "instead of back to back when the output device frees several frames at once");
++REXCVAR_DEFINE_INT32(
++    audio_pace_target_frames, 12, "Audio",
++    "Frames (5.33 ms each) the callback pacing keeps queued at the output device. More rides through longer game "
++    "stalls without a gap, at the cost of audio delay (8 = 43 ms had gaps in 55-140 ms stalls on the iPhone)")
++    .range(4, 24);
+ REXCVAR_DEFINE_INT32(
+     audio_maxqframes, 32, "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+@@ -120,7 +125,7 @@ void AudioSystem::PaceClientCallback(size_t index, int queued) {
+   constexpr auto kFrame = std::chrono::nanoseconds(1000000000ll * 256 / 48000);
+   // Keep about this many frames (43 ms) queued at the device: a real-time pace above it, 10% faster below it.
+   // The queue never reaches audio_maxqframes, so the device's own multi-frame pulls never release a burst.
+-  constexpr int kTargetQueued = 8;
++  const int kTargetQueued = REXCVAR_GET(audio_pace_target_frames);
+   auto& next_due = client_next_callback_[index];
+   auto now = Clock::now();
+   if (queued >= 0 && queued < kTargetQueued / 2) {
+@@ -130,7 +135,7 @@ void AudioSystem::PaceClientCallback(size_t index, int queued) {
+   }
+   // Above the target (after the app was in the background or the device stalled: up to 31 frames = 165 ms of
+   // audio delay that stayed for minutes on the iPhone, 17 Nov), 25% slower until the queue is back at the target.
+-  constexpr int kDrainAbove = kTargetQueued + 2;
++  const int kDrainAbove = kTargetQueued + 2;
+   const auto interval = (queued >= 0 && queued < kTargetQueued) ? kFrame * 9 / 10
+                         : (queued > kDrainAbove)                 ? kFrame * 5 / 4
+                                                                  : kFrame;
+-- 
+2.54.0 (Apple Git-157)
+
