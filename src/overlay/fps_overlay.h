@@ -22,6 +22,9 @@ class FpsOverlay : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override;
+  // A counter refreshed with each guest frame needs no repaints of its own: with the default (true) the SDK
+  // presenter repainted the whole screen at the display rate (120 Hz on ProMotion iPhones) on top of the game.
+  bool WantsContinuousPaint() const override { return false; }
 
  private:
   void Update();
