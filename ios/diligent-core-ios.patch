@@ -26,7 +26,7 @@ index 353157c..4b27c47 100644
      set(PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_VOLK=1)
  else()
 diff --git a/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp b/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
-index 994750b..8d781da 100644
+index 994750b..c786972 100644
 --- a/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
 +++ b/Graphics/GraphicsEngineVulkan/include/VulkanUtilities/CommandBuffer.hpp
 @@ -31,6 +31,10 @@
@@ -50,7 +50,7 @@ index 994750b..8d781da 100644
 +        {
 +            __label__ here;
 +        here:
-+            DiligentRenderScopeEndHook(&&here, __builtin_return_address(0));
++            DiligentRenderScopeEndHook(__builtin_return_address(0), __builtin_return_address(1));
 +        }
 +#endif
          if (m_State.RenderPass != VK_NULL_HANDLE)
