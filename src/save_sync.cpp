@@ -140,37 +140,49 @@ void Log(const char* fmt, ...) {
   }
 }
 
+// Calls fn(rel, path) for every regular file in scope. Walks only the include folders (the save root also holds
+// the DLC content folder, logs and caches: ~800 files on the iPhone), with lexical relative paths: walking the whole
+// root with fs::relative() (a realpath per file) every poll kept a third of a CPU core busy (17 Nov, measured).
+template <typename Fn>
+void ForEachInScope(Fn&& fn) {
+  std::error_code ec;
+  for (const auto& p : g_cfg.include) {
+    fs::path start = g_cfg.root / p;
+    if (fs::is_regular_file(start, ec)) {
+      std::string rel = start.lexically_relative(g_cfg.root).generic_string();
+      if (InScope(rel)) fn(rel, start);
+      continue;
+    }
+    if (!fs::is_directory(start, ec)) continue;
+    for (auto it = fs::recursive_directory_iterator(start, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+      if (!it->is_regular_file(ec)) continue;
+      std::string rel = it->path().lexically_relative(g_cfg.root).generic_string();
+      if (InScope(rel)) fn(rel, it->path());
+    }
+  }
+}
+
 Tree ReadTree() {
   Tree tree;
-  std::error_code ec;
-  if (!fs::is_directory(g_cfg.root, ec)) return tree;
-  for (auto it = fs::recursive_directory_iterator(g_cfg.root, ec); !ec && it != fs::recursive_directory_iterator();
-       it.increment(ec)) {
-    if (!it->is_regular_file(ec)) continue;
-    std::string rel = fs::relative(it->path(), g_cfg.root, ec).generic_string();
-    if (!InScope(rel)) continue;
-    std::ifstream in(it->path(), std::ios::binary);
+  ForEachInScope([&](const std::string& rel, const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
     File f;
     f.data.assign(std::istreambuf_iterator<char>(in), {});
     struct stat st {};
-    if (stat(it->path().c_str(), &st) == 0) f.mtime = st.st_mtime;
+    if (stat(path.c_str(), &st) == 0) f.mtime = st.st_mtime;
     tree[rel] = std::move(f);
-  }
+  });
   return tree;
 }
 
 std::string Signature() {  // cheap change check: names, sizes, dates
-  std::string sig;
-  std::error_code ec;
-  if (!fs::is_directory(g_cfg.root, ec)) return sig;
   std::map<std::string, std::string> rows;
-  for (auto it = fs::recursive_directory_iterator(g_cfg.root, ec); !ec && it != fs::recursive_directory_iterator();
-       it.increment(ec)) {
-    std::string rel = fs::relative(it->path(), g_cfg.root, ec).generic_string();
+  ForEachInScope([&](const std::string& rel, const fs::path& path) {
     struct stat st {};
-    if (!InScope(rel) || stat(it->path().c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
-    rows[rel] = std::to_string(st.st_size) + "/" + std::to_string(st.st_mtime);
-  }
+    if (stat(path.c_str(), &st) == 0) rows[rel] = std::to_string(st.st_size) + "/" + std::to_string(st.st_mtime);
+  });
+  std::string sig;
   for (auto& [k, v] : rows) sig += k + "=" + v + ";";
   return sig;
 }
