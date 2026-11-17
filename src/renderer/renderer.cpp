@@ -1293,11 +1293,13 @@ void PerfOnSwap(uint32_t draws, uint32_t resolves) {
   slowest_ms /= double(slowest);
   REXLOG_INFO(
       "PERF last {:.0f} s: {} frames, avg {:.1f} fps, 1% low {:.1f} fps, worst {:.1f} ms, "
-      "{} frames over {:.0f} ms; compiled {} shaders, {} pipelines (total {}, {})",
+      "{} frames over {:.0f} ms; compiled {} shaders, {} pipelines (total {}, {}); {} draws "
+      "skipped waiting for a pipeline",
       seconds, sorted.size(), sorted.size() / seconds, 1000.0 / slowest_ms, sorted.front(),
       p.slow_frames, kSlowFrameMs, stats.shaders_compiled - p.at_start.shaders_compiled,
       stats.pipelines_created - p.at_start.pipelines_created, stats.shaders_compiled,
-      stats.pipelines_created);
+      stats.pipelines_created,
+      stats.draws_waiting_pipeline - p.at_start.draws_waiting_pipeline);
 #if defined(__APPLE__)
   {
     // NSProcessInfo.processInfo.thermalState: 0 nominal, 1 fair, 2 serious, 3 critical (phones throttle).

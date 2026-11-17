@@ -35,6 +35,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -53,6 +60,10 @@ REXCVAR_DECLARE(bool, dante_rp_diag);
 REXCVAR_DEFINE_BOOL(dante_unified_shared_memory, true, "Graphics",
                     "renderer=dante: keep the guest memory mirror CPU-mapped on unified-memory GPUs "
                     "(Apple) and write changed ranges in place (no copies that split render passes)");
+REXCVAR_DEFINE_BOOL(dante_async_pipelines, true, "Graphics",
+                    "renderer=dante: build a pipeline the game needs for the first time (one not in "
+                    "the recorded list) on a worker thread and skip its draws until it is ready, "
+                    "instead of stopping the frame for the compile (100-450 ms on the iPhone)");
 REXCVAR_DEFINE_BOOL(dante_unified_index_ring, true, "Graphics",
                     "renderer=dante: write indices straight into a CPU-mapped ring when the GPU has "
                     "unified memory (Apple), instead of a buffer copy that splits the render pass");
@@ -201,8 +212,19 @@ struct SamplerVariable {
   uint32_t mag, min, mip, aniso;
 };
 
+// A pipeline being built on the worker thread (dante_async_pipelines).
+struct PsoJob {
+  PipelineKey key{};
+  TranslatedShaders shaders;
+  dl::RefCntAutoPtr<dl::IPipelineState> pso;
+  std::chrono::steady_clock::time_point queued;
+  float build_ms = 0.0f;
+  std::atomic<bool> done{false};
+};
+
 struct Pipeline {
   dl::RefCntAutoPtr<dl::IPipelineState> pso;
+  std::shared_ptr<PsoJob> job;  // set while the pipeline is being built
   dl::RefCntAutoPtr<dl::IShaderResourceBinding> srb;
   std::vector<TextureVariable> textures;
   std::vector<SamplerVariable> samplers;
@@ -282,6 +304,17 @@ struct DrawRenderer::Impl {
   uint32_t draws = 0, skipped_other = 0, pipeline_failures = 0, draw_failures = 0;
   uint32_t skipped_targets = 0, skipped_viewport = 0, skipped_scissor = 0, skipped_pipeline = 0;
   uint64_t uploaded_bytes = 0;
+
+  // dante_async_pipelines worker.
+  std::thread pso_thread;
+  std::mutex pso_mutex;
+  std::condition_variable pso_cv;
+  std::deque<std::shared_ptr<PsoJob>> pso_queue;
+  bool pso_stop = false;
+  uint32_t async_built = 0;
+  void PsoWorker();
+  void QueuePso(const std::shared_ptr<PsoJob>& job);
+  ~Impl();
 
   bool Initialize();
   dl::IBuffer* CreateUniform(const char* name, uint32_t size);
@@ -484,11 +517,47 @@ Pipeline* DrawRenderer::Impl::GetPipeline(const PipelineKey& key,
                                           const TranslatedShaders& shaders,
                                           const StoredDraw* record) {
   auto it = pipelines.find(key);
-  if (it != pipelines.end()) return it->second.pso ? &it->second : nullptr;
+  if (it != pipelines.end()) {
+    Pipeline& p = it->second;
+    if (p.job) {
+      if (!p.job->done.load(std::memory_order_acquire)) {
+        ++g_render_stats.draws_waiting_pipeline;
+        return nullptr;
+      }
+      std::shared_ptr<PsoJob> job = std::move(p.job);
+      p.pso = job->pso;
+      ++async_built;
+      if (async_built <= 64) {
+        float waited = std::chrono::duration<float, std::milli>(
+                           std::chrono::steady_clock::now() - job->queued)
+                           .count();
+        REXLOG_INFO("NATIVE-DRAW: pipeline VS {:016X} PS {:016X} built in the background in "
+                    "{:.1f} ms (ready after {:.1f} ms){}",
+                    key.vertex_key, key.pixel_key, job->build_ms, waited,
+                    p.pso ? "" : " - FAILED");
+      }
+      if (!p.pso) {
+        ++pipeline_failures;
+        return nullptr;
+      }
+      FinishPipeline(p, job->shaders);
+      return &p;
+    }
+    return p.pso ? &p : nullptr;
+  }
   if (storage && record) storage->AddPipeline(*record);
   Pipeline& p = pipelines[key];
-  p.pso = CreatePso(key, shaders);
   ++g_render_stats.pipelines_created;
+  if (REXCVAR_GET(dante_async_pipelines)) {
+    p.job = std::make_shared<PsoJob>();
+    p.job->key = key;
+    p.job->shaders = shaders;
+    p.job->queued = std::chrono::steady_clock::now();
+    QueuePso(p.job);
+    ++g_render_stats.draws_waiting_pipeline;
+    return nullptr;
+  }
+  p.pso = CreatePso(key, shaders);
   if (!p.pso) {
     if (++pipeline_failures <= 8) {
       REXLOG_WARN("NATIVE-DRAW: pipeline failed VS {:016X} PS {:016X} topology {}", key.vertex_key,
@@ -563,6 +632,42 @@ dl::RefCntAutoPtr<dl::IPipelineState> DrawRenderer::Impl::CreatePso(
   dl::RefCntAutoPtr<dl::IPipelineState> pso;
   device->CreateGraphicsPipelineState(ci, &pso);
   return pso;
+}
+
+void DrawRenderer::Impl::PsoWorker() {
+  for (;;) {
+    std::shared_ptr<PsoJob> job;
+    {
+      std::unique_lock lock(pso_mutex);
+      pso_cv.wait(lock, [&] { return pso_stop || !pso_queue.empty(); });
+      if (pso_stop) return;
+      job = std::move(pso_queue.front());
+      pso_queue.pop_front();
+    }
+    auto start = std::chrono::steady_clock::now();
+    job->pso = CreatePso(job->key, job->shaders);
+    job->build_ms =
+        std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+    job->done.store(true, std::memory_order_release);
+  }
+}
+
+void DrawRenderer::Impl::QueuePso(const std::shared_ptr<PsoJob>& job) {
+  {
+    std::lock_guard lock(pso_mutex);
+    pso_queue.push_back(job);
+  }
+  if (!pso_thread.joinable()) pso_thread = std::thread([this] { PsoWorker(); });
+  pso_cv.notify_one();
+}
+
+DrawRenderer::Impl::~Impl() {
+  {
+    std::lock_guard lock(pso_mutex);
+    pso_stop = true;
+  }
+  pso_cv.notify_all();
+  if (pso_thread.joinable()) pso_thread.join();
 }
 
 void DrawRenderer::Impl::FinishPipeline(Pipeline& p, const TranslatedShaders& shaders) {

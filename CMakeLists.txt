@@ -90,10 +90,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # An app bundle; ios/dantes_inferno.toml ships next to the binary. Game files: Documents/game
     # (Files app or devicectl), see OnConfigurePaths.
     set(DANTESINFERNO_IOS_TOML "${CMAKE_CURRENT_SOURCE_DIR}/ios/dantes_inferno.toml")
+    # ios/dante_pipelines.bin = the recorded shader/pipeline list (upstream release list merged with
+    # iPhone recordings, tools/pipeline_storage_merge.py): built at start so first-time effects do not
+    # stall the frame (436 ms on the 15 Pro Max, 17 Nov).
+    set(DANTESINFERNO_IOS_PIPELINES "${CMAKE_CURRENT_SOURCE_DIR}/ios/dante_pipelines.bin")
     add_executable(dantes_inferno MACOSX_BUNDLE ${DANTESINFERNO_SOURCES} ${DANTESINFERNO_IOS_TOML}
-        "${CMAKE_CURRENT_SOURCE_DIR}/ios/AppIcon.png")
+        "${CMAKE_CURRENT_SOURCE_DIR}/ios/AppIcon.png" ${DANTESINFERNO_IOS_PIPELINES})
     set_source_files_properties(${DANTESINFERNO_IOS_TOML} "${CMAKE_CURRENT_SOURCE_DIR}/ios/AppIcon.png"
-        PROPERTIES MACOSX_PACKAGE_LOCATION "")
+        ${DANTESINFERNO_IOS_PIPELINES} PROPERTIES MACOSX_PACKAGE_LOCATION "")
     set(DANTESINFERNO_BUNDLE_ID "com.nyctailblazers.dantesinferno" CACHE STRING "iOS bundle identifier")
     set_target_properties(dantes_inferno PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"

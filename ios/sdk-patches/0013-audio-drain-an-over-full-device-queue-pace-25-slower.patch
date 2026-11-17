@@ -1,0 +1,32 @@
+From 5558dd5bc1a4f483da870dbd5620524b453eb09a Mon Sep 17 00:00:00 2001
+From: Mark Anthony <markususeche@gmail.com>
+Date: Tue, 17 Nov 2026 11:50:18 -0500
+Subject: [PATCH] audio: drain an over-full device queue (pace 25% slower above
+ target+2): after background/stall the queue sat at 18-31 frames = up to 165
+ ms audio delay
+
+---
+ src/audio/audio_system.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 3256555..36b6f0c 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -128,7 +128,12 @@ void AudioSystem::PaceClientCallback(size_t index, int queued) {
+     next_due = now;
+     return;
+   }
+-  const auto interval = (queued >= 0 && queued < kTargetQueued) ? kFrame * 9 / 10 : kFrame;
++  // Above the target (after the app was in the background or the device stalled: up to 31 frames = 165 ms of
++  // audio delay that stayed for minutes on the iPhone, 17 Nov), 25% slower until the queue is back at the target.
++  constexpr int kDrainAbove = kTargetQueued + 2;
++  const auto interval = (queued >= 0 && queued < kTargetQueued) ? kFrame * 9 / 10
++                        : (queued > kDrainAbove)                 ? kFrame * 5 / 4
++                                                                 : kFrame;
+   if (next_due > now) {
+     std::this_thread::sleep_until(next_due);
+     now = next_due;
+-- 
+2.54.0 (Apple Git-157)
+
