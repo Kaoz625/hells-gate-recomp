@@ -40,6 +40,8 @@
 #include <rex/ui/window.h>
 #if defined(__APPLE__)
 #include <SDL3/SDL_metal.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <rex/ui/window_sdl.h>
 #endif
 
@@ -1247,6 +1249,17 @@ void PerfOnSwap(uint32_t draws, uint32_t resolves) {
       p.slow_frames, kSlowFrameMs, stats.shaders_compiled - p.at_start.shaders_compiled,
       stats.pipelines_created - p.at_start.pipelines_created, stats.shaders_compiled,
       stats.pipelines_created);
+#if defined(__APPLE__)
+  {
+    // NSProcessInfo.processInfo.thermalState: 0 nominal, 1 fair, 2 serious, 3 critical (phones throttle).
+    auto send = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend);
+    auto send_long = reinterpret_cast<long (*)(id, SEL)>(objc_msgSend);
+    id info = send(reinterpret_cast<id>(objc_getClass("NSProcessInfo")), sel_registerName("processInfo"));
+    static const char* kThermal[] = {"nominal", "fair", "serious", "critical"};
+    long thermal = info ? send_long(info, sel_registerName("thermalState")) : -1;
+    REXLOG_INFO("PERF thermal: {}", thermal >= 0 && thermal < 4 ? kThermal[thermal] : "unknown");
+  }
+#endif
   std::string threads = BusiestThreads(seconds);
   if (!threads.empty()) REXLOG_INFO("PERF threads: {}", threads);
   std::string hot = HotSpots();
@@ -1423,7 +1436,19 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir, std:
   if (window) {
     window->SetPresenter(nullptr);
     SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(window)->sdl_window();
-    if (sdl && !g_metal_view) g_metal_view = SDL_Metal_CreateView(sdl);
+    if (sdl && !g_metal_view) {
+      g_metal_view = SDL_Metal_CreateView(sdl);
+      // SDL adds the view on top of its siblings, over the touch-controls overlay (it vanished in the first
+      // run). Put it at the back: [[view superview] sendSubviewToBack:view].
+      if (g_metal_view) {
+        auto send = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend);
+        auto send_view = reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend);
+        id view = static_cast<id>(g_metal_view);
+        if (id superview = send(view, sel_registerName("superview"))) {
+          send_view(superview, sel_registerName("sendSubviewToBack:"), view);
+        }
+      }
+    }
     if (g_metal_view) hwnd = SDL_Metal_GetLayer(g_metal_view);
     REXLOG_INFO("DanteDevice: Metal view {} layer {} ({}x{} px)", fmt::ptr(g_metal_view), fmt::ptr(hwnd),
                 window->GetActualPhysicalWidth(), window->GetActualPhysicalHeight());

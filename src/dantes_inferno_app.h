@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autopilot_input.h"
 #include "overlay/achievement_sound.h"
 #include "path_util.h"
 
@@ -295,6 +296,7 @@ class DantesInfernoApp : public rex::ReXApp {
     crash_log::LogGameFiles(game_data_root());
     if (auto* input = dynamic_cast<rex::input::InputSystem*>(runtime()->input_system())) {
       input->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+      autopilot::Install(input);
     }
     timer_resolution::Apply();
     user_paths::Report(user_data_root());

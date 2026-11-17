@@ -56,6 +56,7 @@ endif()
 
 set(DANTESINFERNO_SOURCES
     src/main.cpp
+    src/autopilot_input.cpp
     src/animation_hooks.cpp
     src/damage_hooks.cpp
     src/frame_rate_hooks.cpp
@@ -164,8 +165,9 @@ if(DANTESINFERNO_NATIVE_RENDERER)
     set(DILIGENT_NO_GLSLANG ON CACHE BOOL "Disable glslang in DiligentCore" FORCE)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        # DiligentCore's Vulkan backend on iOS links MoltenVK directly (no loader): the SDK's copy, the same
-        # dylib the Xenos plugin uses, so there is one MoltenVK in the process. No GLES/Metal/WebGPU backends.
+        # DiligentCore's Vulkan backend on iOS: volk initialized from the SDK's MoltenVK in Frameworks/ (the same
+        # dylib the Xenos plugin uses, one MoltenVK in the process; ios/diligent-core-ios.patch). MOLTENVK_LIBRARY
+        # only turns Diligent's Vulkan backend on. No GLES/Metal/WebGPU backends.
         get_filename_component(DANTESINFERNO_SDK_LIB "${rexglue_DIR}/../.." ABSOLUTE)
         set(MOLTENVK_LIBRARY "${DANTESINFERNO_SDK_LIB}/libMoltenVK.dylib" CACHE FILEPATH "MoltenVK library" FORCE)
         set(DILIGENT_NO_OPENGL ON CACHE BOOL "" FORCE)
@@ -378,14 +380,21 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
 
     target_link_libraries(dantes_inferno PRIVATE dante_renderer)
     target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_NATIVE_RENDERER)
-    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        # The SDK's MoltenVK dylib is staged as Frameworks/libMoltenVK.dylib (and dlopened by that name by the
-        # runtime) but its install name is libMoltenVK.1.dylib: point the exe at the staged file, so both load ONE
-        # MoltenVK image.
-        add_custom_command(TARGET dantes_inferno POST_BUILD
-            COMMAND install_name_tool -change @rpath/libMoltenVK.1.dylib @rpath/libMoltenVK.dylib
-                    "$<TARGET_FILE:dantes_inferno>"
-            VERBATIM)
+    if(APPLE)
+        # The exe now carries its own glslang/SPIR-V builder and SDK graphics code (dante_gpu), and so does the
+        # dlopened rexgpu-xenos plugin. Exported weak definitions are coalesced by dyld to the exe's copy, so the
+        # plugin's glslang ran on the exe's thread-local pool allocator and hung in its first shader compile
+        # (17 Nov, iPhone). Keep the exe's copies private.
+        target_link_options(dantes_inferno PRIVATE
+            "LINKER:-unexported_symbol,__ZN7glslang*" "LINKER:-unexported_symbol,__ZNK7glslang*"
+            "LINKER:-unexported_symbol,__ZN3spv*" "LINKER:-unexported_symbol,__ZNK3spv*"
+            "LINKER:-unexported_symbol,__ZN3rex8graphics*" "LINKER:-unexported_symbol,__ZNK3rex8graphics*"
+            "LINKER:-unexported_symbol,__ZTVN7glslang*" "LINKER:-unexported_symbol,__ZTIN7glslang*"
+            "LINKER:-unexported_symbol,__ZTSN7glslang*" "LINKER:-unexported_symbol,__ZTVN3rex8graphics*"
+            "LINKER:-unexported_symbol,__ZTIN3rex8graphics*" "LINKER:-unexported_symbol,__ZTSN3rex8graphics*"
+            "LINKER:-unexported_symbol,__ZTVN3spv*" "LINKER:-unexported_symbol,__ZTIN3spv*"
+            "LINKER:-unexported_symbol,__ZTSN3spv*" "LINKER:-unexported_symbol,__Z*glslang*"
+            "LINKER:-unexported_symbol,_Sh*")
     endif()
 
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
