@@ -6,6 +6,8 @@
 //   "20:start"          tap Start at 20 s (held 150 ms)
 //   "40-70:a/700"       tap A every 700 ms from 40 s to 70 s
 //   "70-90:lup"         hold the left stick up from 70 s to 90 s
+// "file": remote control - Documents/autopilot_cmd.txt (devicectl copy) is re-read whenever it changes and
+// its script runs with times counted from that moment.
 // Buttons: a b x y start back lb rb lt rt up down left right ls rs; sticks: lup ldown lleft lright rup rdown
 // rleft rright.
 
@@ -18,8 +20,11 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sys/stat.h>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -108,8 +113,11 @@ std::vector<Step> Parse(const std::string& script) {
 
 class AutopilotDriver final : public InputDriver {
  public:
-  explicit AutopilotDriver(std::vector<Step> steps)
-      : InputDriver(nullptr, 0), steps_(std::move(steps)), start_(std::chrono::steady_clock::now()) {}
+  AutopilotDriver(std::vector<Step> steps, std::string command_file)
+      : InputDriver(nullptr, 0),
+        steps_(std::move(steps)),
+        command_file_(std::move(command_file)),
+        start_(std::chrono::steady_clock::now()) {}
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
 
@@ -125,7 +133,25 @@ class AutopilotDriver final : public InputDriver {
     if (id != kAutopilotDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (!out_state) return X_ERROR_SUCCESS;
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+    if (!command_file_.empty() && t - last_poll_ >= 0.25) {
+      last_poll_ = t;
+      struct stat st {};
+      if (stat(command_file_.c_str(), &st) == 0 && st.st_mtime + st.st_size * 1e-9 != command_stamp_) {
+        command_stamp_ = st.st_mtime + st.st_size * 1e-9;
+        std::ifstream in(command_file_);
+        std::string script((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<Step> steps = Parse(script);
+        for (Step& step : steps) {
+          step.start += t;
+          step.end += t;
+        }
+        REXLOG_WARN("AUTOPILOT: command file ({} steps): {}", steps.size(), script);
+        std::lock_guard lock(mutex_);
+        steps_ = std::move(steps);
+      }
+    }
     X_INPUT_STATE state{};
+    std::lock_guard steps_lock(mutex_);
     for (const Step& s : steps_) {
       bool active;
       if (s.end <= s.start) {
@@ -144,7 +170,6 @@ class AutopilotDriver final : public InputDriver {
       if (s.rx) state.gamepad.thumb_rx = s.rx;
       if (s.ry) state.gamepad.thumb_ry = s.ry;
     }
-    std::lock_guard lock(mutex_);
     if (std::memcmp(&state.gamepad, &last_.gamepad, sizeof(state.gamepad)) != 0) {
       ++packet_;
       last_ = state;
@@ -178,6 +203,9 @@ class AutopilotDriver final : public InputDriver {
 
  private:
   std::vector<Step> steps_;
+  std::string command_file_;
+  double last_poll_ = -1.0;
+  double command_stamp_ = 0.0;
   std::chrono::steady_clock::time_point start_;
   std::mutex mutex_;
   X_INPUT_STATE last_{};
@@ -189,9 +217,18 @@ class AutopilotDriver final : public InputDriver {
 void Install(rex::input::InputSystem* input) {
   std::string script = REXCVAR_GET(dante_autopilot);
   if (!input || script.empty()) return;
-  auto steps = Parse(script);
-  REXLOG_WARN("AUTOPILOT: scripted pad ON ({} steps): {}", steps.size(), script);
-  input->AddDriver(std::make_unique<AutopilotDriver>(std::move(steps)));
+  std::string command_file;
+  std::vector<Step> steps;
+  if (script == "file") {
+    const char* home = std::getenv("HOME");
+    command_file = std::string(home ? home : ".") + "/Documents/autopilot_cmd.txt";
+    std::remove(command_file.c_str());  // only commands sent during this run count
+  } else {
+    steps = Parse(script);
+  }
+  REXLOG_WARN("AUTOPILOT: scripted pad ON ({} steps{}): {}", steps.size(),
+              command_file.empty() ? "" : ", command file", script);
+  input->AddDriver(std::make_unique<AutopilotDriver>(std::move(steps), std::move(command_file)));
 }
 
 }  // namespace autopilot

@@ -49,6 +49,10 @@ REXCVAR_DEFINE_BOOL(dante_ui_16_9, true, "Graphics",
                     "renderer=dante: draw menus and the HUD in a centred 16:9 area on wider "
                     "screens instead of stretching them");
 
+REXCVAR_DEFINE_BOOL(dante_unified_index_ring, true, "Graphics",
+                    "renderer=dante: write indices straight into a CPU-mapped ring when the GPU has "
+                    "unified memory (Apple), instead of a buffer copy that splits the render pass");
+
 namespace renderer {
 namespace {
 
@@ -232,6 +236,10 @@ struct DrawRenderer::Impl {
   static constexpr uint64_t kStaticFrames = 60;
   std::map<uint32_t, UploadedRange> uploaded;
   dl::RefCntAutoPtr<dl::IBuffer> index_ring;
+  // Unified memory (Apple GPUs): the ring is CPU-mapped and indices are written in place. A copy into a
+  // device buffer (UpdateBuffer) ends the render pass on Vulkan, and on a tile GPU every restart stores and
+  // reloads the attachments: ~180 render passes per frame in Dante on the iPhone (17 Nov).
+  uint8_t* index_ring_cpu = nullptr;
   uint32_t index_ring_offset = 0;
   std::vector<uint8_t> index_scratch;
 
@@ -296,7 +304,24 @@ bool DrawRenderer::Impl::Initialize() {
   index.Size = kIndexRingSize;
   index.BindFlags = dl::BIND_INDEX_BUFFER;
   index.Usage = dl::USAGE_DEFAULT;
-  device->CreateBuffer(index, nullptr, &index_ring);
+  if (REXCVAR_GET(dante_unified_index_ring) &&
+      device->GetAdapterInfo().Memory.UnifiedMemoryCPUAccess & dl::CPU_ACCESS_WRITE) {
+    index.Usage = dl::USAGE_UNIFIED;
+    index.CPUAccessFlags = dl::CPU_ACCESS_WRITE;
+    device->CreateBuffer(index, nullptr, &index_ring);
+    if (index_ring) {
+      void* mapped = nullptr;
+      context->MapBuffer(index_ring, dl::MAP_WRITE, dl::MAP_FLAG_NONE, mapped);
+      index_ring_cpu = static_cast<uint8_t*>(mapped);  // stays mapped (unified memory is coherent)
+    }
+    if (!index_ring_cpu) {
+      index_ring.Release();
+      index.Usage = dl::USAGE_DEFAULT;
+      index.CPUAccessFlags = dl::CPU_ACCESS_NONE;
+    }
+    REXLOG_INFO("NATIVE-DRAW: index ring in unified memory: {}", index_ring_cpu ? "yes" : "no (copies)");
+  }
+  if (!index_ring) device->CreateBuffer(index, nullptr, &index_ring);
 
   system_constants.Attach(
       CreateUniform("XenosSystemConstants", sizeof(Translator::SystemConstants)));
@@ -742,8 +767,12 @@ bool DrawRenderer::DrawUnchecked(const rg::RegisterFile& regs, const TranslatedS
     }
     if (m.index_ring_offset + bytes > kIndexRingSize) m.index_ring_offset = 0;
     index_offset = m.index_ring_offset;
-    m.context->UpdateBuffer(m.index_ring, index_offset, bytes, m.index_scratch.data(),
-                            dl::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if (m.index_ring_cpu) {
+      std::memcpy(m.index_ring_cpu + index_offset, m.index_scratch.data(), bytes);
+    } else {
+      m.context->UpdateBuffer(m.index_ring, index_offset, bytes, m.index_scratch.data(),
+                              dl::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
     m.index_ring_offset = (index_offset + bytes + 3) & ~3u;
   }
 
