@@ -20,6 +20,10 @@
 #include "session_info.h"
 #include "timer_resolution.h"
 #include "user_paths.h"
+#ifdef DANTESINFERNO_SAVE_SYNC
+#include "save_sync.h"
+#include <SDL3/SDL_events.h>
+#endif
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -253,6 +257,22 @@ class DantesInfernoApp : public rex::ReXApp {
   }
 
   void OnPreLaunchModule() override {
+#ifdef DANTESINFERNO_SAVE_SYNC
+    // Before the game reads its save: take a newer one from the savesync store (PS5 played last), then keep
+    // sending new saves from a background thread, and right away when the app goes to the background.
+    {
+      save_sync::Config sync;
+      sync.root = user_data_root();
+      save_sync::Start(sync);
+      SDL_AddEventWatch(
+          [](void*, SDL_Event* e) {
+            if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND || e->type == SDL_EVENT_DID_ENTER_BACKGROUND)
+              save_sync::OnBackground();
+            return true;
+          },
+          nullptr);
+    }
+#endif
     uint8_t* membase = runtime()->memory()->virtual_membase();
 
     if (rex::memory::load_and_swap<uint32_t>(membase + 0x82879110) != 0x3C8082CEu) {
