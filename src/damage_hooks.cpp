@@ -58,6 +58,9 @@ constexpr uint32_t kMessageVictim = 8;  // damage message -> victim entity
 constexpr uint32_t kDamageEvents[] = {0x82CA737C, 0x82CA75E4};
 #endif
 
+}  // namespace
+
+// Also used by the cheat menu's hooks (src/cheats/cheat_hooks.cpp).
 bool IsPlayerTeam(const uint8_t* base, uint32_t entity) {
   if (!IsPlausibleAddress(entity)) return false;
   uint32_t components = Load32(base, entity + kEntityComponents);
@@ -68,8 +71,6 @@ bool IsPlayerTeam(const uint8_t* base, uint32_t entity) {
   uint32_t team = Load32(base, components + slot * 4u);
   return IsPlausibleAddress(team) && Load32(base, team + kTeamOffset) == kPlayerTeam;
 }
-
-}  // namespace
 
 REX_EXTERN(__imp__sub_82239AA8);
 REX_HOOK_RAW(sub_82239AA8) {
