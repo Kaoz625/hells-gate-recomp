@@ -12,6 +12,9 @@
 
 #include <rex/cvar.h>
 
+#include <chrono>
+#include <mutex>
+
 REXCVAR_DEFINE_STRING(renderer, "xenos", "Graphics",
                       "Graphics system. Builds without the native renderer only have 'xenos' (the "
                       "rexgpu-xenos plugin renders)")
@@ -51,8 +54,21 @@ void LastIndexBuffer(uint32_t& base, uint32_t& count, uint32_t& format) { base =
 void SetButtonGlyphStyleSource(std::function<GlyphStyle()>) {}
 void SetButtonGlyphBindingsSource(std::function<KeyBindings()>) {}
 
-PresentCount PresentedFrames() { return {}; }
-void AfterSwap(const CallArgs&, const uint8_t*, bool) {}
+// The guest's swaps, counted here so the FPS overlay and logs still measure the game's frame rate.
+namespace {
+std::mutex g_present_mutex;
+PresentCount g_presented;
+}  // namespace
+
+PresentCount PresentedFrames() {
+  std::lock_guard<std::mutex> lock(g_present_mutex);
+  return g_presented;
+}
+void AfterSwap(const CallArgs&, const uint8_t*, bool) {
+  std::lock_guard<std::mutex> lock(g_present_mutex);
+  ++g_presented.frames;
+  g_presented.last = std::chrono::steady_clock::now();
+}
 
 void ConfigureSyncOnlyGpu() {}
 

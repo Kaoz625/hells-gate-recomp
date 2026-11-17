@@ -6,3 +6,6 @@
 gpu_plugin = 'xenos'
 gpu_backend = 'vulkan'
 
+
+# On-screen FPS counter while the port is being tested (F1 toggles it on a keyboard).
+show_fps_overlay = true
