@@ -56,6 +56,27 @@ index 994750b..c786972 100644
          if (m_State.RenderPass != VK_NULL_HANDLE)
              EndRenderPass();
          else if (m_State.DynamicRenderingHash != 0)
+diff --git a/Graphics/GraphicsEngineVulkan/src/DeviceContextVkImpl.cpp b/Graphics/GraphicsEngineVulkan/src/DeviceContextVkImpl.cpp
+index ef8d20e..15cb2a9 100644
+--- a/Graphics/GraphicsEngineVulkan/src/DeviceContextVkImpl.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/DeviceContextVkImpl.cpp
+@@ -3256,6 +3256,16 @@ void DeviceContextVkImpl::TransitionOrVerifyTextureState(TextureVkImpl&
+         VERIFY(m_pActiveRenderPass == nullptr, "State transitions are not allowed inside a render pass");
+         if (Texture.IsInKnownState())
+         {
++#if PLATFORM_IOS
++            // Hell's Gate blz/ios-native: an attachment already in its attachment state (render target, depth
++            // write) needs no barrier to be bound again. Diligent issued an "after write" RT->RT / depth->depth
++            // barrier every time render targets were re-bound; each barrier ends the render pass, and on a tile
++            // GPU (MoltenVK, Metal tracks these hazards itself) every split stores and reloads the attachments:
++            // ~200 splits per frame in Dante (17 Nov 2026).
++            if ((RequiredState == RESOURCE_STATE_RENDER_TARGET || RequiredState == RESOURCE_STATE_DEPTH_WRITE) &&
++                Texture.GetState() == RequiredState && Texture.GetLayout() == ExpectedLayout)
++                return;
++#endif
+             TransitionTextureState(Texture, RESOURCE_STATE_UNKNOWN, RequiredState, STATE_TRANSITION_FLAG_UPDATE_STATE);
+             VERIFY_EXPR(Texture.GetLayout() == ExpectedLayout);
+         }
 diff --git a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp b/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp
 index 74a21fc..a7aa641 100644
 --- a/Graphics/GraphicsEngineVulkan/src/VulkanUtilities/CommandBuffer.cpp

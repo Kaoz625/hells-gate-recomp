@@ -264,6 +264,11 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
         rex::runtime
     )
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        target_sources(dante_renderer PRIVATE src/renderer/ios_lifecycle.cpp)
+        set_source_files_properties(src/renderer/ios_lifecycle.cpp PROPERTIES
+            COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         # No volk on iOS (Diligent calls MoltenVK directly); Vulkan headers come with the SDK install.
         target_link_libraries(dante_renderer PRIVATE "-framework QuartzCore" "-framework UIKit")
     else()

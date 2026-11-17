@@ -15,6 +15,7 @@
 #include "thread_cpu.h"
 #include "ui_overlay.h"
 #include "vulkan_device.h"
+#include "ios_lifecycle.h"
 
 #include "Common/interface/RefCntAutoPtr.hpp"
 #include "Primitives/interface/DataBlob.h"
@@ -45,6 +46,7 @@
 #include <objc/runtime.h>
 #include <rex/ui/window_sdl.h>
 extern "C" void (*DiligentRenderScopeEndHook)(void* site, void* caller);
+namespace renderer { std::string TakeTargetTransitions(); }
 #endif
 
 #include <fmt/format.h>
@@ -1254,6 +1256,7 @@ void LogRenderScopeEnds(double seconds, size_t frames) {
   }
   REXLOG_INFO("PERF render passes ended: {} in {:.0f} s ({:.0f}/frame):{}", total, seconds,
               frames ? double(total) / frames : 0.0, out);
+  REXLOG_INFO("PERF draw target states:{}", TakeTargetTransitions());
 }
 #endif
 
@@ -1485,6 +1488,7 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir, std:
   if (window) {
     window->SetPresenter(nullptr);
     SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(window)->sdl_window();
+    InstallAppLifecycleObservers();
     if (sdl && !g_metal_view) {
       g_metal_view = SDL_Metal_CreateView(sdl);
       // SDL adds the view on top of its siblings, over the touch-controls overlay (it vanished in the first
@@ -1965,6 +1969,10 @@ void SetButtonGlyphBindingsSource(std::function<KeyBindings()> source) {
 
 // Swap(pFrontBuffer, ...): present the native texture resolved to the front buffer.
 void AfterSwap(const CallArgs& a, const uint8_t* base, bool log_next_frame) {
+#if defined(__APPLE__)
+  // No GPU work while the app is in the background (see ios_lifecycle.cpp); the game pauses here.
+  if (WaitWhileInactive()) REXLOG_INFO("DanteDevice: app active again, resuming");
+#endif
   std::lock_guard lock(g_mutex);
   if (!g_device) return;
   FlushDrawLog();

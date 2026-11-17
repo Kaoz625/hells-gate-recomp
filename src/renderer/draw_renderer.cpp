@@ -49,6 +49,7 @@ REXCVAR_DEFINE_BOOL(dante_ui_16_9, true, "Graphics",
                     "renderer=dante: draw menus and the HUD in a centred 16:9 area on wider "
                     "screens instead of stretching them");
 
+REXCVAR_DECLARE(bool, dante_rp_diag);
 REXCVAR_DEFINE_BOOL(dante_unified_shared_memory, true, "Graphics",
                     "renderer=dante: keep the guest memory mirror CPU-mapped on unified-memory GPUs "
                     "(Apple) and write changed ranges in place (no copies that split render passes)");
@@ -57,6 +58,22 @@ REXCVAR_DEFINE_BOOL(dante_unified_index_ring, true, "Graphics",
                     "unified memory (Apple), instead of a buffer copy that splits the render pass");
 
 namespace renderer {
+
+// dante_rp_diag: why render passes split (counted per PERF window, see LogTargetTransitions).
+static std::mutex g_target_transitions_mutex;
+static std::map<std::string, uint64_t> g_target_transitions;
+void NoteTargetTransition(const std::string& what) {
+  std::lock_guard lock(g_target_transitions_mutex);
+  ++g_target_transitions[what];
+}
+std::string TakeTargetTransitions() {
+  std::lock_guard lock(g_target_transitions_mutex);
+  std::string out;
+  for (auto& [k, v] : g_target_transitions) out += fmt::format(" {}x [{}];", v, k);
+  g_target_transitions.clear();
+  return out;
+}
+
 namespace {
 
 namespace dl = Diligent;
@@ -1091,6 +1108,23 @@ bool DrawRenderer::DrawUnchecked(const rg::RegisterFile& regs, const TranslatedS
 
   dl::ITextureView* rtvs[4] = {};
   for (uint32_t i = 0; i < targets.color_count; ++i) rtvs[i] = targets.color[i];
+  if (REXCVAR_GET(dante_rp_diag)) {
+    // Which bound targets arrive in another state (each such transition ends the render pass).
+    auto check = [&](dl::ITextureView* view, dl::RESOURCE_STATE want, const char* what) {
+      if (!view) return;
+      dl::ITexture* tex = view->GetTexture();
+      dl::RESOURCE_STATE state = tex->GetState();
+      if (state != want) NoteTargetTransition(fmt::format("{} {} {:X}", what, int(tex->GetDesc().Format), uint32_t(state)));
+    };
+    for (uint32_t i = 0; i < targets.color_count; ++i)
+      check(rtvs[i], dl::RESOURCE_STATE_RENDER_TARGET, "color");
+    check(targets.depth, dl::RESOURCE_STATE_DEPTH_WRITE, "depth");
+    static dl::ITextureView* last_rtv0 = nullptr;
+    static dl::ITextureView* last_dsv = nullptr;
+    if (rtvs[0] != last_rtv0 || targets.depth != last_dsv) NoteTargetTransition("target set changed");
+    last_rtv0 = rtvs[0];
+    last_dsv = targets.depth;
+  }
   m.context->SetRenderTargets(targets.color_count, rtvs, targets.depth,
                               dl::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   dl::Viewport vp;
