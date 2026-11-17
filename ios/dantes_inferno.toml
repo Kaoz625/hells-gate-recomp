@@ -9,6 +9,9 @@ gpu_plugin = 'xenos'
 gpu_backend = 'vulkan'
 # Phone defaults for the native renderer: game resolution (1280x720 targets), shadows at the original size.
 dante_shadow_scale = 1
+# PlayStation button prompts, as on the PS5 port (needs renderer = 'dante'). Markus plays with a Backbone One
+# PlayStation Edition, which SDL reports as a generic pad, so 'auto' would pick Xbox prompts.
+glyph_family = 'playstation5'
 
 
 # On-screen FPS counter while the port is being tested (F1 toggles it on a keyboard).
