@@ -1,0 +1,321 @@
+From cc06d7c7a50602ac4aff746e488acab4d6a07134 Mon Sep 17 00:00:00 2001
+From: blz <blz@local>
+Date: Tue, 17 Nov 2026 08:55:40 -0500
+Subject: [PATCH] audio diagnostics: per-driver APU-DIAG/pattern/dump, iOS
+ 256-frame pulls, XMA output rate, XMA 1 ms poll; guest timing diag (delays,
+ timers, timed waits)
+
+---
+ include/rex/audio/sdl/sdl_audio_driver.h   | 10 ++++
+ src/audio/sdl/sdl_audio_driver.cpp         | 57 +++++++++++++++++-----
+ src/audio/xma_context.cpp                  | 18 +++++++
+ src/audio/xma_decoder.cpp                  |  7 ++-
+ src/kernel/xboxkrnl/xboxkrnl_threading.cpp | 38 ++++++++++++++-
+ 5 files changed, 115 insertions(+), 15 deletions(-)
+
+diff --git a/include/rex/audio/sdl/sdl_audio_driver.h b/include/rex/audio/sdl/sdl_audio_driver.h
+index 1b8101b..33c43c2 100644
+--- a/include/rex/audio/sdl/sdl_audio_driver.h
++++ b/include/rex/audio/sdl/sdl_audio_driver.h
+@@ -11,6 +11,8 @@
+ 
+ #pragma once
+ 
++#include <cstdio>
++#include <string>
+ #include <mutex>
+ #include <queue>
+ #include <stack>
+@@ -52,6 +54,14 @@ class SDLAudioDriver : public AudioDriver {
+ 
+   bool playing_ = false;
+   uint32_t underruns_ = 0;
++  // Diagnostics (blz/ios): per-driver counters and the optional output dump.
++  int diag_id_ = 0;
++  uint32_t diag_frames_ = 0;
++  float diag_peak_ = 0.0f;
++  std::string diag_pattern_;
++  std::FILE* dump_file_ = nullptr;
++  uint64_t dump_bytes_left_ = 0;
++  bool dump_started_ = false;
+   uint32_t silent_buffers_ = 0;
+   uint64_t underrun_window_start_ = 0;
+ };
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 985dec1..352898b 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -10,6 +10,9 @@
+  */
+ 
+ #include <algorithm>
++#include <map>
++#include <string>
++#include <atomic>
+ #include <array>
+ #include <cmath>
+ #include <cstdio>
+@@ -47,8 +50,17 @@ SDLAudioDriver::~SDLAudioDriver() {
+ }
+ 
+ bool SDLAudioDriver::Initialize() {
++  static std::atomic<int> next_diag_id{0};
++  diag_id_ = next_diag_id.fetch_add(1);
+   // Set audio category for proper OS audio handling
+   SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++  // iOS hands the stream ~1024-sample pulls. Each pull freed 4 guest frames at once, the guest rendered them back to
++  // back, and the XMA decoder (one 512-sample frame per wake-up) only had data for the first two: the output went
++  // 512 samples on / 512 off, heard as distortion and stretched sounds (Dante's Inferno, iPhone 15 Pro Max,
++  // 17 Nov 2026). Ask for one guest frame (256 samples) per pull so the decoder keeps pace.
++  SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "256");
++#endif
+ 
+   // Set app name for audio device identification
+   SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
+@@ -114,8 +126,8 @@ bool SDLAudioDriver::Initialize() {
+   // first thing worth knowing when a report says the balance is wrong on one
+   // speaker setup and right on another.
+   const char* device_name = SDL_GetAudioDeviceName(sdl_device);
+-  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
+-              device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
++  REXAPU_INFO("audio driver {}: endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
++              diag_id_, device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
+               static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+ 
+   if (!SDL_ResumeAudioDevice(sdl_device)) {
+@@ -144,8 +156,8 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+   // Audio health, every 1000 guest frames (~5 s at 48 kHz/256): proves whether the guest submits audio, how loud
+   // it is (guest floats are big-endian), and whether SDL starves - "no sound" reports start here (blz/ios).
+   {
+-    static uint32_t diag_frames = 0;
+-    static float diag_peak = 0.0f;
++    uint32_t& diag_frames = diag_frames_;
++    float& diag_peak = diag_peak_;
+     const auto* words = reinterpret_cast<const uint32_t*>(output_frame);
+     for (uint32_t i = 0; i < frame_samples_; i += 8) {
+       uint32_t w = words[i];
+@@ -154,10 +166,19 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+       std::memcpy(&v, &w, sizeof(v));
+       if (v == v) diag_peak = std::max(diag_peak, std::fabs(v));
+     }
++    {
++      // Which guest frames are silent, as a 0/1 string of 96 frames once (blz/ios diagnostics).
++      bool silent = true;
++      for (uint32_t i = 0; i < frame_samples_; ++i) {
++        if (words[i] != 0) { silent = false; break; }
++      }
++      if (diag_frames >= 3000 && diag_frames < 3096) diag_pattern_ += silent ? '0' : '1';
++      if (diag_frames == 3096) REXAPU_INFO("APU-PATTERN[{}] (1 = sound): {}", diag_id_, diag_pattern_);
++    }
+     if (++diag_frames % 1000 == 0) {
+       std::unique_lock<std::mutex> guard(frames_mutex_);
+-      REXAPU_INFO("APU-DIAG: guest frames {} peak {:.4f} queued {} underruns {} silent_buffers {} mute {}",
+-                  diag_frames, diag_peak, frames_queued_.size(), underruns_, silent_buffers_,
++      REXAPU_INFO("APU-DIAG[{}]: guest frames {} peak {:.4f} queued {} underruns {} silent_buffers {} mute {}",
++                  diag_id_, diag_frames, diag_peak, frames_queued_.size(), underruns_, silent_buffers_,
+                   REXCVAR_GET(audio_mute));
+       diag_peak = 0.0f;
+     }
+@@ -214,6 +235,19 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     return;
+   }
+   // Snapshot once. A change mid-callback would split the frame across two mixes.
++  {
++    // Pull sizes (blz/ios diagnostics): logged once after 400 callbacks.
++    static std::map<int, int> pulls;
++    static int pull_count = 0;
++    if (pull_count < 400) {
++      ++pulls[additional_amount];
++      if (++pull_count == 400) {
++        std::string t;
++        for (auto& [k, v] : pulls) t += fmt::format(" {}B x{}", k, v);
++        REXAPU_INFO("APU-PULLS (bytes per SDL pull, 2048 = one guest frame):{}", t);
++      }
++    }
++  }
+   const StereoFold fold = GetStereoFold();
+   const SurroundMix mix = GetSurroundMix();
+   const float gain = GetOutputGain();
+@@ -258,13 +292,14 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+         }
+       }
+       {
+-        static std::FILE* dump = nullptr;
+-        static uint64_t dump_bytes_left = 0;
+-        static bool dump_started = false;
++        std::FILE*& dump = driver->dump_file_;
++        uint64_t& dump_bytes_left = driver->dump_bytes_left_;
++        bool& dump_started = driver->dump_started_;
+         if (!dump_started && REXCVAR_GET(audio_dump_seconds) > 0) {
+           dump_started = true;
+-          std::string path = "audio_out.f32";
+-          if (const char* home = std::getenv("HOME")) path = std::string(home) + "/Documents/audio_out.f32";
++          std::string name = "audio_out" + std::to_string(driver->diag_id_) + ".f32";
++          std::string path = name;
++          if (const char* home = std::getenv("HOME")) path = std::string(home) + "/Documents/" + name;
+           dump = std::fopen(path.c_str(), "wb");
+           dump_bytes_left = uint64_t(REXCVAR_GET(audio_dump_seconds)) * frame_frequency_ *
+                             driver->sdl_device_channels_ * sizeof(float);
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 4ee14f9..0ca65fb 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -9,6 +9,8 @@
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+ 
++#include <chrono>
++#include <atomic>
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -465,6 +467,22 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
+ 
+   output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
+                    subframes_to_write * kOutputBytesPerBlock);
++  {
++    // Decoded output volume (blz/ios audio diagnostics), logged every 5 s.
++    static std::atomic<uint64_t> bytes{0}, writes{0};
++    static std::atomic<int64_t> window_start{0};
++    bytes.fetch_add(uint64_t(subframes_to_write) * kOutputBytesPerBlock, std::memory_order_relaxed);
++    writes.fetch_add(1, std::memory_order_relaxed);
++    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
++                            std::chrono::steady_clock::now().time_since_epoch()).count();
++    int64_t start = window_start.load();
++    if (!start) window_start.compare_exchange_strong(start, now);
++    else if (now - start >= 5000 && window_start.compare_exchange_strong(start, now)) {
++      REXAPU_INFO("XMA-DIAG: {:.0f} bytes/s decoded output in {} writes ({:.1f}/s), stereo={}",
++                  bytes.exchange(0) * 1000.0 / (now - start), writes.load(), writes.exchange(0) * 1000.0 / (now - start),
++                  int(data->is_stereo));
++    }
++  }
+ 
+   const int8_t headroom = (current_frame_remaining_subframes_ - subframes_to_write == 0)
+                               ? data->output_buffer_padding
+diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
+index 5efb367..110be4f 100644
+--- a/src/audio/xma_decoder.cpp
++++ b/src/audio/xma_decoder.cpp
+@@ -16,6 +16,7 @@
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/xma/decoder.h>
+ #include <rex/cvar.h>
++#include <chrono>
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+ #include <rex/perf/counter.h>
+@@ -167,8 +168,10 @@ void XmaDecoder::WorkerThreadMain() {
+     if (did_work) {
+       continue;
+     }
+-    // No work done this iteration, block until signaled.
+-    rex::thread::Wait(work_event_.get(), false);
++    // No work done this iteration, block until signaled - or 1 ms. The guest frees output space by moving its read
++    // offset, which does not signal us; waiting for the next kick left the output buffer empty every other 512-sample
++    // frame on iPhone (guest audio frames went 1100 1100..., heard as distortion and stretched sounds, 17 Nov 2026).
++    rex::thread::Wait(work_event_.get(), false, std::chrono::milliseconds(1));
+   }
+ }
+ 
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index 57fd161..ab7365b 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -12,6 +12,9 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <string>
++#include <mutex>
++#include <map>
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
+@@ -373,6 +376,21 @@ u32 KeQueryPerformanceFrequency_entry() {
+   return static_cast<uint32_t>(result);
+ }
+ 
++
++namespace {
++// Timing requests seen from the guest (blz/ios audio diagnostics): each distinct (kind, thread, value) once, plus a
++// count per 1000 calls, so a stretched mixer period shows up in the log.
++void TimingDiag(const char* kind, int64_t value) {
++  static std::mutex m;
++  static std::map<std::string, uint64_t> seen;
++  auto* t = rex::system::XThread::GetCurrentThread();
++  std::string key = fmt::format("{} {} {}", kind, t ? t->name() : std::string("?"), value);
++  std::lock_guard<std::mutex> lock(m);
++  uint64_t n = ++seen[key];
++  if (n == 1 || n % 1000 == 0) REXKRNL_INFO("TIMING-DIAG {} x{}", key, n);
++}
++}  // namespace
++
+ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 interval_ptr) {
+   XThread* thread = XThread::GetCurrentThread();
+ 
+@@ -380,6 +398,7 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
+     thread->DeliverAPCs();
+   }
+ 
++  TimingDiag("delay100ns", int64_t(uint64_t(*interval_ptr)));
+   X_STATUS result = thread->Delay(processor_mode, alertable, *interval_ptr);
+ 
+   if (alertable && result == X_STATUS_USER_APC) {
+@@ -787,6 +806,8 @@ u32 NtSetTimerEx_entry(u32 timer_handle, mapped_u64 due_time_ptr,
+   assert_true(unk_zero == 0);
+ 
+   uint64_t due_time = *due_time_ptr;
++  TimingDiag("timer_period_ms", period_ms);
++  TimingDiag("timer_due100ns", int64_t(due_time));
+ 
+   X_STATUS result = X_STATUS_SUCCESS;
+ 
+@@ -847,6 +868,9 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
+   auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode, alertable,
+                                         timeout_ptr ? &timeout : nullptr);
+   // REXKRNL_IMPORT_RESULT("KeWaitForSingleObject", "{:#x}", result);
++  if (timeout_ptr && static_cast<uint64_t>(*timeout_ptr) != 0) {
++    TimingDiag(result == X_STATUS_TIMEOUT ? "wait_TIMEOUT" : "wait_ok", int64_t(uint64_t(*timeout_ptr)));
++  }
+   return result;
+ }
+ 
+@@ -865,6 +889,9 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
+     result = X_STATUS_INVALID_HANDLE;
+   }
+ 
++  if (timeout_ptr && static_cast<uint64_t>(*timeout_ptr) != 0) {
++    TimingDiag(result == X_STATUS_TIMEOUT ? "wait_TIMEOUT" : "wait_ok", int64_t(uint64_t(*timeout_ptr)));
++  }
+   return result;
+ }
+ 
+@@ -891,6 +918,9 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
+   if (alertable && result == X_STATUS_USER_APC) {
+     XThread::GetCurrentThread()->DeliverAPCs();
+   }
++  if (timeout_ptr && static_cast<uint64_t>(*timeout_ptr) != 0) {
++    TimingDiag(result == X_STATUS_TIMEOUT ? "wait_TIMEOUT" : "wait_ok", int64_t(uint64_t(*timeout_ptr)));
++  }
+   return result;
+ }
+ 
+@@ -920,8 +950,12 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
+ u32 NtWaitForMultipleObjectsEx_entry(u32 count, mapped_u32 handles, u32 wait_type, u32 wait_mode,
+                                      u32 alertable, mapped_u64 timeout_ptr) {
+   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+-  return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode, alertable,
+-                                      timeout_ptr ? &timeout : nullptr);
++  X_STATUS result = xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode, alertable,
++                                                 timeout_ptr ? &timeout : nullptr);
++  if (timeout_ptr && static_cast<uint64_t>(*timeout_ptr) != 0) {
++    TimingDiag(result == X_STATUS_TIMEOUT ? "wait_TIMEOUT" : "wait_ok", int64_t(uint64_t(*timeout_ptr)));
++  }
++  return result;
+ }
+ 
+ u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u32 alertable,
+-- 
+2.54.0 (Apple Git-157)
+
