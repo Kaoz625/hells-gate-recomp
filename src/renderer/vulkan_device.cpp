@@ -162,7 +162,13 @@ bool VulkanDevice::Initialize(void* hwnd, uint32_t width, uint32_t height) {
   sc_desc.DefaultDepthValue = 1.0f;
   sc_desc.IsPrimary = true;
 
+#if defined(__APPLE__)
+  // iOS: `hwnd` is the CAMetalLayer the renderer made for the window (renderer.cpp Start).
+  Diligent::NativeWindow native_window{};
+  native_window.pCALayer = hwnd;
+#else
   Diligent::NativeWindow native_window(hwnd);
+#endif
 
   impl_->factory->CreateSwapChainVk(impl_->device, impl_->context, sc_desc, native_window,
                                     &impl_->swapchain);

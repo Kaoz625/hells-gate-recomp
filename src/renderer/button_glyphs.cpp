@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -29,6 +30,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -249,9 +251,10 @@ void Over(float* dst, const float rgb[3], float a) {
 // Text (GDI, bold, drawn at 4x): Palatino Linotype on the game's stone
 // buttons, Bahnschrift on Kenney's keys.
 
-constexpr int kTextScale = 4;
 constexpr const wchar_t* kSerif = L"Palatino Linotype";
 constexpr const wchar_t* kKeyFont = L"Bahnschrift";
+#ifdef _WIN32
+constexpr int kTextScale = 4;
 
 class GdiCanvas {
  public:
@@ -387,6 +390,8 @@ Mask CenteredText(int w, int h, const std::wstring& text, const float box[4], in
   return canvas.Downsample();
 }
 
+#endif  // _WIN32
+
 enum class Symbol { kCross, kCircle, kSquare, kTriangle };
 
 // Keyboard / mouse labels
@@ -468,6 +473,7 @@ KeyLabel ParseBinding(const std::string& binding) {
   return {-1, text};
 }
 
+#ifdef _WIN32
 // Ink size (1x pixels) of text at font_px.
 std::pair<float, float> InkSize(const std::wstring& text, int font_px, const wchar_t* face) {
   GdiCanvas canvas(font_px * int(text.size() + 2), font_px * 3);
@@ -498,6 +504,41 @@ Mask FittedText(int w, int h, const std::wstring& text, const float box[4],
   float scale = std::min((box[2] - box[0]) / ink_w, (box[3] - box[1]) / ink_h);
   return CenteredText(w, h, text, box, std::max(4, int(kReference * scale)), face);
 }
+
+#else
+// No GDI (iOS, blz/ios-native; same as the PS5 port): the engraved shoulder prompts L1/L2/R1/R2 from a
+// 5x7 bitmap font; other text labels stay blank.
+Mask FittedText(int w, int h, const std::wstring& text, const float box[4],
+                const wchar_t* = kSerif) {
+  constexpr std::array<uint8_t, 7> l{16, 16, 16, 16, 16, 16, 31};
+  constexpr std::array<uint8_t, 7> r{30, 17, 17, 30, 20, 18, 17};
+  constexpr std::array<uint8_t, 7> one{4, 12, 4, 4, 4, 4, 14};
+  constexpr std::array<uint8_t, 7> two{14, 17, 1, 2, 4, 8, 31};
+  Mask mask(w, h);
+  if (text.size() != 2 || (text[0] != L'L' && text[0] != L'R') ||
+      (text[1] != L'1' && text[1] != L'2')) return mask;
+  const auto& letter = text[0] == L'L' ? l : r;
+  const auto& digit = text[1] == L'1' ? one : two;
+  const float scale = std::min((box[2] - box[0]) / 11, (box[3] - box[1]) / 7);
+  if (scale <= 0) return mask;
+  const float left = (box[0] + box[2] - 11 * scale) / 2;
+  const float top = (box[1] + box[3] - 7 * scale) / 2;
+  for (int y = std::max(0, int(std::floor(top))); y < std::min(h, int(std::ceil(top + 7 * scale))); ++y) {
+    for (int x = std::max(0, int(std::floor(left))); x < std::min(w, int(std::ceil(left + 11 * scale))); ++x) {
+      for (float dy : {.25f, .75f}) {
+        for (float dx : {.25f, .75f}) {
+          const int row = int(std::floor((y + dy - top) / scale));
+          const int column = int(std::floor((x + dx - left) / scale));
+          if (row < 0 || row >= 7 || column < 0 || column >= 11 || column == 5) continue;
+          const auto& glyph = column < 5 ? letter : digit;
+          if (glyph[row] & (16 >> (column % 6))) mask.at(x, y) += .25f;
+        }
+      }
+    }
+  }
+  return mask;
+}
+#endif  // _WIN32
 
 // A mouse seen from above, filling the height of box; button 0 / 1 / 2 is
 // filled (any other value: none).

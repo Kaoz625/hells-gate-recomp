@@ -38,6 +38,10 @@
 #include <rex/logging.h>
 #include <rex/logging/macros.h>
 #include <rex/ui/window.h>
+#if defined(__APPLE__)
+#include <SDL3/SDL_metal.h>
+#include <rex/ui/window_sdl.h>
+#endif
 
 #include <fmt/format.h>
 #include <xxhash.h>
@@ -296,6 +300,9 @@ RenderScale ComputeRenderScale(rex::ui::Window* window) {
 }
 
 std::unique_ptr<VulkanDevice> g_device;
+#if defined(__APPLE__)
+SDL_MetalView g_metal_view = nullptr;  // iOS: DiligentCore's CAMetalLayer (Start)
+#endif
 uint64_t g_frame = 0;
 bool g_log_this_frame = false;
 // First frame of an F8 capture: every resolve output and the front buffer are
@@ -1408,7 +1415,22 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir, std:
   constexpr uint32_t kMinVulkanMajor = 1, kMinVulkanMinor = 1;
   std::lock_guard lock(g_mutex);
   if (g_device) return true;
+#if defined(__APPLE__)
+  // iOS: no HWND. Detach the SDK presenter first (it frees its own Metal view), then give DiligentCore a
+  // CAMetalLayer of its own on the SDL window. The SDK always makes a WindowSDL here (static_cast: its type
+  // info is in the runtime dylib). The touch overlay brings itself back to the front on its next refresh.
+  void* hwnd = nullptr;
+  if (window) {
+    window->SetPresenter(nullptr);
+    SDL_Window* sdl = static_cast<rex::ui::WindowSDL*>(window)->sdl_window();
+    if (sdl && !g_metal_view) g_metal_view = SDL_Metal_CreateView(sdl);
+    if (g_metal_view) hwnd = SDL_Metal_GetLayer(g_metal_view);
+    REXLOG_INFO("DanteDevice: Metal view {} layer {} ({}x{} px)", fmt::ptr(g_metal_view), fmt::ptr(hwnd),
+                window->GetActualPhysicalWidth(), window->GetActualPhysicalHeight());
+  }
+#else
   void* hwnd = window ? window->GetNativeWindowHandle() : nullptr;
+#endif
   if (!hwnd) {
     REXLOG_ERROR("DanteDevice: no game window");
     error = "The game window could not be created.";
@@ -1416,7 +1438,13 @@ bool Start(rex::ui::Window* window, const std::filesystem::path& cache_dir, std:
   }
   window->SetPresenter(nullptr);
   auto device = std::make_unique<VulkanDevice>();
-  if (!device->Initialize(hwnd, 1280, 720)) {
+#if defined(__APPLE__)
+  const uint32_t init_width = std::max<uint32_t>(window->GetActualPhysicalWidth(), 1);
+  const uint32_t init_height = std::max<uint32_t>(window->GetActualPhysicalHeight(), 1);
+#else
+  const uint32_t init_width = 1280, init_height = 720;
+#endif
+  if (!device->Initialize(hwnd, init_width, init_height)) {
     REXLOG_ERROR("DanteDevice: native device initialization failed");
     error = fmt::format(
         "Vulkan could not be started on this graphics card.\n\nDante's Inferno needs a graphics "

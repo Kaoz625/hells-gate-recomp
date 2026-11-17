@@ -12,9 +12,9 @@ endif()
 option(DANTESINFERNO_NATIVE_RENDERER "Build native DiligentCore/Vulkan renderer" ON)
 option(DANTESINFERNO_FIDELITYFX "Enable AMD FidelityFX present effects (CAS/FSR)" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    # iPhone/iPad (blz/ios): the SDK's Xenos plugin draws through MoltenVK. The DiligentCore renderer,
-    # FidelityFX (D3D12) and the Qt launcher are desktop-only.
-    set(DANTESINFERNO_NATIVE_RENDERER OFF CACHE BOOL "" FORCE)
+    # iPhone/iPad (blz/ios-native): the DiligentCore renderer (renderer = "dante") draws through its Vulkan
+    # backend on MoltenVK; the SDK's Xenos plugin stays loaded for GPU sync only. -DDANTESINFERNO_NATIVE_RENDERER=OFF
+    # gives the blz/ios build (the plugin draws everything). FidelityFX (D3D12) and the Qt launcher are desktop-only.
     set(DANTESINFERNO_FIDELITYFX OFF CACHE BOOL "" FORCE)
     set(DANTESINFERNO_BUILD_LAUNCHER OFF CACHE BOOL "" FORCE)
     # Markus's own builds carry the cheats (god mode, one-hit kills); both stay off until switched on in
@@ -163,6 +163,17 @@ if(DANTESINFERNO_NATIVE_RENDERER)
     # glslang in vulkan_device.cpp instead.
     set(DILIGENT_NO_GLSLANG ON CACHE BOOL "Disable glslang in DiligentCore" FORCE)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # DiligentCore's Vulkan backend on iOS links MoltenVK directly (no loader): the SDK's copy, the same
+        # dylib the Xenos plugin uses, so there is one MoltenVK in the process. No GLES/Metal/WebGPU backends.
+        get_filename_component(DANTESINFERNO_SDK_LIB "${rexglue_DIR}/../.." ABSOLUTE)
+        set(MOLTENVK_LIBRARY "${DANTESINFERNO_SDK_LIB}/libMoltenVK.dylib" CACHE FILEPATH "MoltenVK library" FORCE)
+        set(DILIGENT_NO_OPENGL ON CACHE BOOL "" FORCE)
+        set(DILIGENT_NO_METAL ON CACHE BOOL "" FORCE)
+        set(DILIGENT_NO_WEBGPU ON CACHE BOOL "" FORCE)
+        set(DILIGENT_NO_ARCHIVER ON CACHE BOOL "" FORCE)
+        set(DILIGENT_NO_FORMAT_VALIDATION ON CACHE BOOL "" FORCE)
+    endif()
     add_subdirectory("${DILIGENT_CORE_DIR}" "${CMAKE_BINARY_DIR}/diligent-core" EXCLUDE_FROM_ALL)
 
     add_library(dante_renderer STATIC
@@ -239,15 +250,29 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
         Diligent-GraphicsTools
         Diligent-Common
         rex::runtime
-        volk::volk
-        Vulkan::Headers
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # No volk on iOS (Diligent calls MoltenVK directly); Vulkan headers come with the SDK install.
+        target_link_libraries(dante_renderer PRIVATE "-framework QuartzCore" "-framework UIKit")
+    else()
+        target_link_libraries(dante_renderer PRIVATE volk::volk Vulkan::Headers)
+    endif()
 
     # dante_gpu: the SDK's Xenos graphics backend compiled in-process
     # (core + SPIR-V + Vulkan), replacing the runtime-loaded rexgpu-xenos.dll
     # when renderer=native. Source list mirrors src/graphics/CMakeLists.txt
     # minus plugin_main.cpp and the D3D12/DXBC backend.
-    if(REXSDK_DIR)
+    # dante_gpu needs the SDK's source tree. Desktop: REXSDK_DIR (the SDK built in-tree). iOS: the SDK is
+    # prebuilt and installed (rexglue_DIR), so only its sources are compiled here, against the installed headers.
+    set(DANTE_GPU_SDK_DIR "${REXSDK_DIR}")
+    if(NOT DANTE_GPU_SDK_DIR AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(DANTESINFERNO_SDK_SOURCE_DIR "$ENV{HOME}/src/dante-ios/rexglue-sdk" CACHE PATH
+            "rexglue-sdk source tree the installed iOS SDK was built from")
+        set(DANTE_GPU_SDK_DIR "${DANTESINFERNO_SDK_SOURCE_DIR}")
+    endif()
+    if(DANTE_GPU_SDK_DIR)
+        set(REXSDK_DIR_SAVED "${REXSDK_DIR}")
+        set(REXSDK_DIR "${DANTE_GPU_SDK_DIR}")
         set(DANTE_GPU_SOURCES
             # Core GPU types
             ${REXSDK_DIR}/src/graphics/flags.cpp
@@ -294,6 +319,12 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
             ${REXSDK_DIR}/thirdparty/renderdoc
         )
         target_compile_options(dante_gpu PRIVATE -Wno-unused-variable)
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            # Installed SDK: its static glslang/xxhash and headers (vk_mem_alloc.h, vulkan/) are rex:: targets.
+            target_include_directories(dante_gpu PRIVATE ${REXSDK_DIR}/thirdparty/glslang)
+            target_link_libraries(dante_gpu PRIVATE rex::runtime rex::xxhash rex::SPIRV rex::glslang
+                rex::MachineIndependent rex::GenericCodeGen rex::OSDependent rex::OGLCompiler)
+        else()
         target_link_libraries(dante_gpu PRIVATE
             rex::runtime
             xxHash::xxhash
@@ -306,9 +337,12 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
             OSDependent
             OGLCompiler
         )
+        endif()
         target_link_libraries(dante_renderer PRIVATE dante_gpu)
-        # GDI renders the button glyph labels (button_glyphs.cpp).
-        target_link_libraries(dante_renderer PRIVATE gdi32)
+        if(WIN32)
+            # GDI renders the button glyph labels (button_glyphs.cpp).
+            target_link_libraries(dante_renderer PRIVATE gdi32)
+        endif()
 
         # glslang for runtime GLSL->SPIR-V compilation in vulkan_device.cpp
         # (DiligentCore is built with DILIGENT_NO_GLSLANG). ResourceLimits.cpp
@@ -322,6 +356,10 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
             ${REXSDK_DIR}/thirdparty/glslang/StandAlone
             ${REXSDK_DIR}/thirdparty/renderdoc
         )
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            target_link_libraries(dante_renderer PRIVATE rex::xxhash rex::SPIRV rex::glslang
+                rex::MachineIndependent rex::GenericCodeGen rex::OSDependent rex::OGLCompiler)
+        else()
         target_link_libraries(dante_renderer PRIVATE
             xxHash::xxhash
             glslang::SPIRV
@@ -331,6 +369,8 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
             OSDependent
             OGLCompiler
         )
+        endif()
+        set(REXSDK_DIR "${REXSDK_DIR_SAVED}")
     else()
         message(WARNING "dante_gpu requires REXSDK_DIR (SDK source tree); "
                         "renderer=native will be unavailable")
@@ -338,7 +378,17 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
 
     target_link_libraries(dantes_inferno PRIVATE dante_renderer)
     target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_NATIVE_RENDERER)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # The SDK's MoltenVK dylib is staged as Frameworks/libMoltenVK.dylib (and dlopened by that name by the
+        # runtime) but its install name is libMoltenVK.1.dylib: point the exe at the staged file, so both load ONE
+        # MoltenVK image.
+        add_custom_command(TARGET dantes_inferno POST_BUILD
+            COMMAND install_name_tool -change @rpath/libMoltenVK.1.dylib @rpath/libMoltenVK.dylib
+                    "$<TARGET_FILE:dantes_inferno>"
+            VERBATIM)
+    endif()
 
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(DANTESINFERNO_NATIVE_SOURCES
         src/renderer/dantes_inferno_native_main.cpp
         src/renderer/d3d_hooks.cpp
@@ -358,6 +408,7 @@ extern const size_t kGlyphIconFileCount = sizeof(kGlyphIconFiles) / sizeof(kGlyp
     )
     target_link_libraries(dantes_inferno_native PRIVATE dante_renderer)
     target_compile_definitions(dantes_inferno_native PRIVATE DANTESINFERNO_NATIVE_RENDERER)
+    endif()  # dantes_inferno_native: desktop only
 
 endif()
 

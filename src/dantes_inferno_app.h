@@ -284,6 +284,13 @@ class DantesInfernoApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+#if defined(__APPLE__)
+    // Phones: flush the log on warnings only, not on every info line. Many info lines are written from the game
+    // and GPU threads, and each flush is a write() on that thread (deivid22srk's Android port does the same).
+    for (const auto& entry : rex::GetAllCategories()) {
+      if (entry.logger) entry.logger->flush_on(spdlog::level::warn);
+    }
+#endif
     session_info::Log();
     crash_log::LogGameFiles(game_data_root());
     if (auto* input = dynamic_cast<rex::input::InputSystem*>(runtime()->input_system())) {
@@ -669,10 +676,10 @@ class DantesInfernoApp : public rex::ReXApp {
   }
 
   rex::graphics::CommandProcessor* GetCommandProcessor() {
-#if defined(__APPLE__) && !defined(DANTESINFERNO_NATIVE_RENDERER)
-    // GraphicsSystem's type info lives in the dlopened rexgpu-xenos plugin, which this build does not link
-    // (blz/ios). With renderer = xenos (the only choice here) the runtime's graphics system is that plugin's
-    // GraphicsSystem.
+#if defined(__APPLE__)
+    // GraphicsSystem's type info lives in the dlopened rexgpu-xenos plugin (hidden visibility; the native
+    // renderer's in-exe copy is a different type_info), so dynamic_cast fails on Apple. The runtime's graphics
+    // system is always that plugin's GraphicsSystem (renderer = xenos or dante).
     auto* graphics = static_cast<rex::graphics::GraphicsSystem*>(
         runtime() ? runtime()->graphics_system() : nullptr);
 #else

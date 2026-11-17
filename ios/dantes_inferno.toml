@@ -2,9 +2,13 @@
 # Game files: the extracted disc + default.xexp (Title Update 2) in the app's Documents/game folder
 # (Files app, or `xcrun devicectl device copy to`); dantes_inferno_app.h OnConfigurePaths looks there first.
 
-# The SDK's Xenos plugin through MoltenVK (the DiligentCore native renderer is desktop-only).
+# Hell's Gate's native renderer (DiligentCore Vulkan on MoltenVK, blz/ios-native) draws; the SDK's Xenos plugin
+# stays loaded for GPU sync only (gpu_host_rendering off). renderer = 'xenos' = the plugin draws everything (blz/ios).
+renderer = 'dante'
 gpu_plugin = 'xenos'
 gpu_backend = 'vulkan'
+# Phone defaults for the native renderer: game resolution (1280x720 targets), shadows at the original size.
+dante_shadow_scale = 1
 
 
 # On-screen FPS counter while the port is being tested (F1 toggles it on a keyboard).
