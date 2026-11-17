@@ -9,6 +9,10 @@
 #include <TargetConditionals.h>
 #endif
 #include "overlay/achievement_ui.h"
+#ifdef DANTESINFERNO_DEV_CHEATS
+#include "cheats/cheats.h"
+#include "overlay/cheat_menu.h"
+#endif
 #include "overlay/fps_overlay.h"
 #include "overlay/overlay_style.h"
 #include "overlay/shader_progress.h"
@@ -415,6 +419,21 @@ class DantesInfernoApp : public rex::ReXApp {
       }
     });
 
+#ifdef DANTESINFERNO_DEV_CHEATS
+    // Cheat menu: L3+R3 on a pad (seen in the game's pad read, cheat_hooks.cpp), a three-finger tap on
+    // iPhone/iPad, or F3. Choices are kept in <user data>/cheats.toml.
+    cheats::Load(user_data_root());
+    cheats::SetOpenRequestHandler([this] { app_context().CallInUIThread([this] { OpenCheatMenu(); }); });
+    cheats::InstallTouchGesture();
+    rex::ui::RegisterBind("bind_cheat_menu", "F3", "Open or close the cheat menu", [this] {
+      if (cheat_menu_) {
+        cheat_menu_.reset();
+      } else {
+        OpenCheatMenu();
+      }
+    });
+#endif
+
     rex::ui::RegisterBind("bind_dante_smaa", "End", "renderer=dante: toggle SMAA", [] {
       bool enabled = !rex::cvar::Query<bool>("dante_smaa");
       rex::cvar::SetFlagByName("dante_smaa", enabled ? "true" : "false");
@@ -628,6 +647,10 @@ class DantesInfernoApp : public rex::ReXApp {
     rex::cvar::UnregisterChangeCallbacks("time_scalar");
     rex::cvar::UnregisterChangeCallbacks("ultrawide_target_aspect");
     fps_overlay_.reset();
+#ifdef DANTESINFERNO_DEV_CHEATS
+    cheat_menu_.reset();
+    cheats::SetOpenRequestHandler(nullptr);
+#endif
     shader_progress_.reset();
     rex::chrono::Clock::set_guest_time_scalar(1.0);
     rex::cvar::SetFlagByName("vsync", saved_vsync_ ? "true" : "false");
@@ -638,7 +661,7 @@ class DantesInfernoApp : public rex::ReXApp {
       "bind_exit_game",      "bind_fps_overlay",      "bind_pass_trace",   "bind_d3d_trace",
       "bind_host_rendering", "bind_dante_debug_view", "bind_rdoc_capture", "bind_dante_smaa",
       "bind_dante_replay",   "bind_dante_record",     "bind_cheat_god",    "bind_cheat_one_hit",
-      "bind_verify_gpu_state", "bind_fast_forward",
+      "bind_verify_gpu_state", "bind_fast_forward",     "bind_cheat_menu",
   };
 
   static void ShowFatalError(const std::string& message) {
@@ -668,6 +691,27 @@ class DantesInfernoApp : public rex::ReXApp {
     }
     fps_overlay_ = std::make_unique<overlay::FpsOverlay>(imgui_drawer(), std::move(counter));
   }
+
+#ifdef DANTESINFERNO_DEV_CHEATS
+  // UI thread.
+  void OpenCheatMenu() {
+    if (cheat_menu_ || shutting_down_ || !imgui_drawer() || !runtime()) return;
+    auto* input = dynamic_cast<rex::input::InputSystem*>(runtime()->input_system());
+    auto pad = [input](uint16_t& buttons, int16_t& stick_y) {
+      rex::input::X_INPUT_STATE state = {};
+      if (!input || input->GetState(0, &state) != 0) return false;
+      buttons = state.gamepad.buttons;
+      stick_y = state.gamepad.thumb_ly;
+      return true;
+    };
+    cheat_menu_ = std::make_unique<overlay::CheatMenu>(imgui_drawer(), pad, [this] {
+      app_context().CallInUIThread([this] { cheat_menu_.reset(); });
+    });
+    REXLOG_INFO("CHEATS: menu open");
+  }
+
+  std::unique_ptr<overlay::CheatMenu> cheat_menu_;
+#endif
 
   // UI thread, after each presented frame (renderer=dante).
   void DrawOverlayFrame() {
