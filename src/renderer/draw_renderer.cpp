@@ -49,6 +49,9 @@ REXCVAR_DEFINE_BOOL(dante_ui_16_9, true, "Graphics",
                     "renderer=dante: draw menus and the HUD in a centred 16:9 area on wider "
                     "screens instead of stretching them");
 
+REXCVAR_DEFINE_BOOL(dante_unified_shared_memory, true, "Graphics",
+                    "renderer=dante: keep the guest memory mirror CPU-mapped on unified-memory GPUs "
+                    "(Apple) and write changed ranges in place (no copies that split render passes)");
 REXCVAR_DEFINE_BOOL(dante_unified_index_ring, true, "Graphics",
                     "renderer=dante: write indices straight into a CPU-mapped ring when the GPU has "
                     "unified memory (Apple), instead of a buffer copy that splits the render pass");
@@ -240,6 +243,7 @@ struct DrawRenderer::Impl {
   // device buffer (UpdateBuffer) ends the render pass on Vulkan, and on a tile GPU every restart stores and
   // reloads the attachments: ~180 render passes per frame in Dante on the iPhone (17 Nov).
   uint8_t* index_ring_cpu = nullptr;
+  uint8_t* shared_memory_cpu = nullptr;  // same for the guest memory mirror (dante_unified_shared_memory)
   uint32_t index_ring_offset = 0;
   std::vector<uint8_t> index_scratch;
 
@@ -297,7 +301,27 @@ bool DrawRenderer::Impl::Initialize() {
   shared.Usage = dl::USAGE_DEFAULT;
   shared.Mode = dl::BUFFER_MODE_RAW;
   shared.ElementByteStride = 4;
-  device->CreateBuffer(shared, nullptr, &shared_memory);
+  if (REXCVAR_GET(dante_unified_shared_memory) &&
+      device->GetAdapterInfo().Memory.UnifiedMemoryCPUAccess & dl::CPU_ACCESS_WRITE) {
+    // Guest data written in place: the GPU may still read the previous contents for a frame in flight,
+    // the same hazard the 360 GPU (reading guest memory directly) gives the game.
+    shared.Usage = dl::USAGE_UNIFIED;
+    shared.CPUAccessFlags = dl::CPU_ACCESS_WRITE;
+    device->CreateBuffer(shared, nullptr, &shared_memory);
+    if (shared_memory) {
+      void* mapped = nullptr;
+      context->MapBuffer(shared_memory, dl::MAP_WRITE, dl::MAP_FLAG_NONE, mapped);
+      shared_memory_cpu = static_cast<uint8_t*>(mapped);
+    }
+    if (!shared_memory_cpu) {
+      shared_memory.Release();
+      shared.Usage = dl::USAGE_DEFAULT;
+      shared.CPUAccessFlags = dl::CPU_ACCESS_NONE;
+    }
+    REXLOG_INFO("NATIVE-DRAW: guest memory mirror in unified memory: {}",
+                shared_memory_cpu ? "yes" : "no (copies)");
+  }
+  if (!shared_memory) device->CreateBuffer(shared, nullptr, &shared_memory);
 
   dl::BufferDesc index;
   index.Name = "XenosIndexRing";
@@ -383,8 +407,12 @@ void DrawRenderer::Impl::Upload(const uint8_t* base, uint32_t address, uint32_t 
   if (it != uploaded.begin() && std::prev(it)->second.end > address) --it;
   while (it != uploaded.end() && it->first < end) it = uploaded.erase(it);
   uploaded.emplace(address, UploadedRange{end, hash, frame, frame});
-  context->UpdateBuffer(shared_memory, address, size, data,
-                        dl::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  if (shared_memory_cpu) {
+    std::memcpy(shared_memory_cpu + address, data, size);
+  } else {
+    context->UpdateBuffer(shared_memory, address, size, data,
+                          dl::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  }
   uploaded_bytes += size;
 }
 
