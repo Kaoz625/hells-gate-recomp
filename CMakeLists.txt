@@ -11,6 +11,13 @@ endif()
 
 option(DANTESINFERNO_NATIVE_RENDERER "Build native DiligentCore/Vulkan renderer" ON)
 option(DANTESINFERNO_FIDELITYFX "Enable AMD FidelityFX present effects (CAS/FSR)" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # iPhone/iPad (blz/ios): the SDK's Xenos plugin draws through MoltenVK. The DiligentCore renderer,
+    # FidelityFX (D3D12) and the Qt launcher are desktop-only.
+    set(DANTESINFERNO_NATIVE_RENDERER OFF CACHE BOOL "" FORCE)
+    set(DANTESINFERNO_FIDELITYFX OFF CACHE BOOL "" FORCE)
+    set(DANTESINFERNO_BUILD_LAUNCHER OFF CACHE BOOL "" FORCE)
+endif()
 # God mode / one-hit kills for recording playthroughs; never in releases
 # (package-release.ps1 refuses an exe that has them).
 option(DANTESINFERNO_DEV_CHEATS "Build the development cheats (src/damage_hooks.cpp)" OFF)
@@ -64,11 +71,44 @@ if(WIN32)
     # A PDB in every build, so crash reports' addresses map to function names
     # (archived per release, not shipped).
     target_link_options(dantes_inferno PRIVATE "LINKER:/DEBUG")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # An app bundle; ios/dantes_inferno.toml ships next to the binary. Game files: Documents/game
+    # (Files app or devicectl), see OnConfigurePaths.
+    set(DANTESINFERNO_IOS_TOML "${CMAKE_CURRENT_SOURCE_DIR}/ios/dantes_inferno.toml")
+    add_executable(dantes_inferno MACOSX_BUNDLE ${DANTESINFERNO_SOURCES} ${DANTESINFERNO_IOS_TOML}
+        "${CMAKE_CURRENT_SOURCE_DIR}/ios/AppIcon.png")
+    set_source_files_properties(${DANTESINFERNO_IOS_TOML} "${CMAKE_CURRENT_SOURCE_DIR}/ios/AppIcon.png"
+        PROPERTIES MACOSX_PACKAGE_LOCATION "")
+    set(DANTESINFERNO_BUNDLE_ID "com.nyctailblazers.dantesinferno" CACHE STRING "iOS bundle identifier")
+    set_target_properties(dantes_inferno PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${DANTESINFERNO_BUNDLE_ID}"
+        BUILD_RPATH "@executable_path/Frameworks"
+        INSTALL_RPATH "@executable_path/Frameworks")
 else()
     add_executable(dantes_inferno ${DANTESINFERNO_SOURCES})
 endif()
 
+# The registration table is one huge function; it runs once at start-up. -O3 takes 20+ min on it and arm64
+# GlobalISel is quadratic on it at -O0 (x360-native MK vs DC lesson), so -O0 with SelectionDAG.
+if(APPLE)
+    set_source_files_properties(generated/default/dantes_inferno_register.cpp
+        PROPERTIES COMPILE_OPTIONS "-O0;-fno-global-isel" SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
 rexglue_setup_target(dantes_inferno)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    # The SDK stages librexruntime + MoltenVK into Frameworks/; the Xenos GPU plugin is dlopened by name
+    # from Frameworks/ (gpu_plugin_loader.cpp), so copy it from the installed SDK.
+    get_filename_component(DANTESINFERNO_SDK_LIB "${rexglue_DIR}/../.." ABSOLUTE)
+    add_custom_command(TARGET dantes_inferno POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:dantes_inferno>/Frameworks"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DANTESINFERNO_SDK_LIB}/librexgpu-xenos.dylib"
+                "$<TARGET_BUNDLE_CONTENT_DIR:dantes_inferno>/Frameworks/librexgpu-xenos.dylib"
+        VERBATIM)
+    target_link_options(dantes_inferno PRIVATE "-Wl,-rpath,@executable_path/Frameworks")
+endif()
 if(DANTESINFERNO_DEV_CHEATS)
     target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_DEV_CHEATS)
 endif()

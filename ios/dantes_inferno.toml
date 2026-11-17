@@ -1,0 +1,8 @@
+# iPhone/iPad settings, shipped inside the app bundle next to the binary (blz/ios).
+# Game files: the extracted disc + default.xexp (Title Update 2) in the app's Documents/game folder
+# (Files app, or `xcrun devicectl device copy to`); dantes_inferno_app.h OnConfigurePaths looks there first.
+
+# The SDK's Xenos plugin through MoltenVK (the DiligentCore native renderer is desktop-only).
+gpu_plugin = 'xenos'
+gpu_backend = 'vulkan'
+

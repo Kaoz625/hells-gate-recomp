@@ -2,6 +2,11 @@
 
 #include "overlay/achievement_sound.h"
 #include "path_util.h"
+
+#include <cstdlib>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "overlay/achievement_ui.h"
 #include "overlay/fps_overlay.h"
 #include "overlay/overlay_style.h"
@@ -110,6 +115,18 @@ class DantesInfernoApp : public rex::ReXApp {
       }
     }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // iPhone/iPad: the app's Documents folder (Files app, devicectl copy) holds the extracted disc +
+    // default.xexp in game/.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+      std::error_code ios_ec;
+      auto documents_game = std::filesystem::path(home) / "Documents" / "game";
+      if (std::filesystem::is_directory(documents_game, ios_ec)) {
+        paths.game_data_root = documents_game;
+        return;
+      }
+    }
+#endif
     const std::filesystem::path candidates[] = {
         rex::filesystem::GetExecutableFolder() / "game",
         std::filesystem::current_path() / "game",
