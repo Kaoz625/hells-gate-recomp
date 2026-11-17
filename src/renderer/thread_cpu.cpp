@@ -265,6 +265,77 @@ bool ProcessMemory(uint64_t& private_bytes, uint64_t& working_set) {
   return true;
 }
 
+#elif defined(__APPLE__)
+
+// iPhone/iPad (blz/ios-native): per-thread CPU from Mach (THREAD_EXTENDED_INFO has the time and the pthread
+// name), memory = the task's physical footprint (what jetsam counts).
+}  // namespace renderer
+#include <mach/mach.h>
+namespace renderer {
+
+namespace {
+struct MachSample {
+  uint64_t cpu_us = 0;
+  std::string name;
+};
+std::unordered_map<uint64_t, MachSample> g_mach_previous;
+}  // namespace
+
+std::string BusiestThreads(double window_seconds) {
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return {};
+  std::unordered_map<uint64_t, MachSample> current;
+  std::vector<std::pair<double, std::string>> busy;
+  for (mach_msg_type_number_t i = 0; i < count; ++i) {
+    thread_identifier_info_data_t ident{};
+    mach_msg_type_number_t ident_count = THREAD_IDENTIFIER_INFO_COUNT;
+    thread_extended_info_data_t ext{};
+    mach_msg_type_number_t ext_count = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(threads[i], THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&ident),
+                    &ident_count) == KERN_SUCCESS &&
+        thread_info(threads[i], THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&ext),
+                    &ext_count) == KERN_SUCCESS) {
+      MachSample sample;
+      sample.cpu_us = (ext.pth_user_time + ext.pth_system_time) / 1000;
+      sample.name = ext.pth_name[0] ? std::string(ext.pth_name) : fmt::format("tid {}", ident.thread_id);
+      auto it = g_mach_previous.find(ident.thread_id);
+      if (it != g_mach_previous.end() && window_seconds > 0.0) {
+        double percent = double(sample.cpu_us - it->second.cpu_us) / (window_seconds * 1e4);
+        busy.push_back({percent, sample.name});
+      }
+      current[ident.thread_id] = std::move(sample);
+    }
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), vm_address_t(threads), count * sizeof(thread_act_t));
+  g_mach_previous = std::move(current);
+  if (busy.empty()) return {};
+  double total = 0.0;
+  for (const auto& b : busy) total += b.first;
+  std::sort(busy.begin(), busy.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::string out = fmt::format("CPU {:.0f}% of one core:", total);
+  for (size_t i = 0; i < std::min<size_t>(busy.size(), 8) && busy[i].first >= 1.0; ++i) {
+    out += fmt::format(" {} {:.0f}%,", busy[i].second, busy[i].first);
+  }
+  if (out.back() == ',') out.pop_back();
+  return out;
+}
+
+std::string HotSpots() { return {}; }
+
+bool ProcessMemory(uint64_t& private_bytes, uint64_t& working_set) {
+  task_vm_info_data_t info{};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) !=
+      KERN_SUCCESS) {
+    return false;
+  }
+  private_bytes = info.phys_footprint;
+  working_set = info.resident_size;
+  return true;
+}
+
 #else
 
 std::string BusiestThreads(double) { return {}; }
