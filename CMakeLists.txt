@@ -32,6 +32,13 @@ if(DANTESINFERNO_NATIVE_RENDERER)
     set(REXGLUE_USE_VULKAN ON CACHE BOOL "Enable Vulkan graphics backend" FORCE)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT TARGET rex::rexglue)
+    # The iOS SDK builds no host tools: codegen runs on a desktop host (Linux/macOS rexglue with the same
+    # patched SDK) and generated/ is copied in, so the build's codegen step is a no-op here.
+    add_executable(rex::rexglue IMPORTED)
+    set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION /usr/bin/true)
+endif()
+
 include(generated/rexglue.cmake)
 
 if(REXSDK_DIR)
