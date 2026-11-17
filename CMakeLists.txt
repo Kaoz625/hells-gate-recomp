@@ -104,6 +104,10 @@ if(APPLE)
 endif()
 
 rexglue_setup_target(dantes_inferno)
+if(NOT DANTESINFERNO_NATIVE_RENDERER)
+    # The hooks still call the native renderer; it is not built here, so they get no-op bodies (xenos renders).
+    target_sources(dantes_inferno PRIVATE src/renderer/no_native_renderer.cpp)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # The SDK stages librexruntime + MoltenVK into Frameworks/; the Xenos GPU plugin is dlopened by name

@@ -660,8 +660,16 @@ class DantesInfernoApp : public rex::ReXApp {
   }
 
   rex::graphics::CommandProcessor* GetCommandProcessor() {
+#if defined(__APPLE__) && !defined(DANTESINFERNO_NATIVE_RENDERER)
+    // GraphicsSystem's type info lives in the dlopened rexgpu-xenos plugin, which this build does not link
+    // (blz/ios). With renderer = xenos (the only choice here) the runtime's graphics system is that plugin's
+    // GraphicsSystem.
+    auto* graphics = static_cast<rex::graphics::GraphicsSystem*>(
+        runtime() ? runtime()->graphics_system() : nullptr);
+#else
     auto* graphics = dynamic_cast<rex::graphics::GraphicsSystem*>(
         runtime() ? runtime()->graphics_system() : nullptr);
+#endif
     return graphics ? graphics->command_processor() : nullptr;
   }
 

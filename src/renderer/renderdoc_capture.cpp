@@ -1,5 +1,7 @@
 #include "renderdoc_capture.h"
 
+#if defined(_WIN32)
+
 #include <rex/cvar.h>
 #include <rex/logging/macros.h>
 
@@ -61,3 +63,11 @@ void RenderDocOnGuestSwap() {
 }
 
 }  // namespace renderer
+
+#else  // RenderDoc in-app capture is Windows-only; other platforms (iOS, blz/ios) get a no-op.
+
+namespace renderer {
+void RenderDocOnGuestSwap() {}
+}  // namespace renderer
+
+#endif
