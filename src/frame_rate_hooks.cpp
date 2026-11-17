@@ -13,6 +13,7 @@
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/logging/macros.h>
 #include <rex/ppc/context.h>
 
 #include <chrono>
@@ -106,4 +107,55 @@ REX_HOOK_RAW(sub_82629450) {
     Store16(base, pad + 2, previous[i]);
   }
   StoreFloat(base, kGameFrameTime, frame_time);
+}
+
+// Vblanks per frame. The present function sub_824DB9E0 waits until the guest
+// vblank count (0x82CA892C) reaches the last present + N, N = the top of a
+// small stack (entries 8 bytes apart from 0x82CA8948, depth at 0x829AFE24).
+// N is 0 or 1 in play; scenes that push 2 run at half the refresh rate (30 fps
+// at 60 Hz). dante_max_vblanks_per_frame caps N for the call; each change of
+// the game's N is logged with the game frame time (PRESENT-N lines).
+REXCVAR_DEFINE_INT32(dante_max_vblanks_per_frame, 0, "Graphics",
+                     "Cap the vblanks the game waits per frame (1: scenes the game runs at half rate - "
+                     "30 fps cutscenes - run at the full rate; 0: as the game asks)")
+    .range(0, 4);
+
+namespace {
+constexpr uint32_t kVblankStack = 0x82CA8948;
+constexpr uint32_t kVblankStackDepth = 0x829AFE24;
+uint32_t g_last_vblanks = ~0u;
+uint32_t g_present_count = 0;
+float g_frame_time_sum = 0.0f;
+std::chrono::steady_clock::time_point g_window_start;
+}  // namespace
+
+REX_EXTERN(__imp__sub_824DB9E0);
+REX_HOOK_RAW(sub_824DB9E0) {
+  uint32_t depth = Load32(base, kVblankStackDepth);
+  uint32_t slot = (depth >= 1 && depth <= 16) ? kVblankStack + depth * 8 - 8 : 0;
+  uint32_t vblanks = slot ? Load32(base, slot) : 0;
+  using Clock = std::chrono::steady_clock;
+  ++g_present_count;
+  g_frame_time_sum += LoadFloat(base, kGameFrameTime);
+  if (vblanks != g_last_vblanks || g_present_count == 600) {
+    double real = std::chrono::duration<double>(Clock::now() - g_window_start).count();
+    if (g_last_vblanks != ~0u && g_present_count) {
+      REXLOG_INFO("PRESENT-N: game asks {} vblanks/frame (was {}, depth {}); last {} frames: real {:.2f} ms/frame, "
+                  "game frame time {:.2f} ms",
+                  vblanks, g_last_vblanks, depth, g_present_count, 1000.0 * real / g_present_count,
+                  1000.0 * g_frame_time_sum / g_present_count);
+    }
+    g_last_vblanks = vblanks;
+    g_present_count = 0;
+    g_frame_time_sum = 0.0f;
+    g_window_start = Clock::now();
+  }
+  int32_t cap = REXCVAR_GET(dante_max_vblanks_per_frame);
+  if (cap > 0 && slot && vblanks > uint32_t(cap)) {
+    Store32(base, slot, uint32_t(cap));
+    __imp__sub_824DB9E0(ctx, base);
+    if (Load32(base, slot) == uint32_t(cap)) Store32(base, slot, vblanks);
+    return;
+  }
+  __imp__sub_824DB9E0(ctx, base);
 }
